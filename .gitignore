@@ -1,0 +1,71 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment & Secret files
+.env
+.env.*
+!.env.example
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary / Scratch files
+scratch/
+*.bak
+*.log
+
+# Flutter / Dart specific
+gold_tracker/.dart_tool/
+gold_tracker/.flutter-plugins
+gold_tracker/.flutter-plugins-dependencies
+gold_tracker/.packages
+gold_tracker/build/
+gold_tracker/.idea/
+gold_tracker/android/.gradle/
+gold_tracker/android/local.properties
+gold_tracker/ios/.symlinks/
+gold_tracker/ios/Pods/
+gold_tracker/ios/Podfile.lock
+gold_tracker/macos/Pods/
+gold_tracker/macos/Podfile.lock

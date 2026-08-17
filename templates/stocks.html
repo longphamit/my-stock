@@ -1,0 +1,414 @@
+{% extends "base.html" %}
+
+{% block sidebar %}
+            <div class="panel-header">
+                <h2 id="sidebar-panel-header">
+                    <i class="fa-solid fa-list-check" style="color: var(--accent-primary)"></i>
+                    <span>Thị Trường &amp; Watchlist</span>
+                </h2>
+                <div style="display: flex; gap: 0.4rem; align-items: center;">
+                    <button class="btn-refresh" onclick="handleRefreshClick()" id="refresh-btn" title="Làm mới bảng giá">
+                        <i class="fa-solid fa-rotate"></i>
+                        <span>Tải lại</span>
+                    </button>
+                    <button class="btn-refresh" onclick="toggleSidebar()" title="Thu gọn thanh bên" style="background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.06); padding: 0.45rem 0.6rem;">
+                        <i class="fa-solid fa-chevron-left"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Stock Sub Tabs -->
+            <div class="tab-group" id="stock-sub-tabs" style="margin: 0 0.75rem 0.75rem 0.75rem; display: none;">
+                <button class="tab-btn active" onclick="switchSidebarTab('watchlist')" id="tab-watchlist-list" style="flex: 1; text-align: center;">
+                    Watchlist (<span id="watchlist-count">0</span>)
+                </button>
+                <button class="tab-btn" onclick="switchSidebarTab('vn100')" id="tab-vn100-list" style="flex: 1; text-align: center;">
+                    VN100 (<span id="vn100-count">0</span>)
+                </button>
+                <button class="tab-btn" onclick="switchSidebarTab('vnall')" id="tab-vnall-list" style="flex: 1; text-align: center;">
+                    VNAll (<span id="vnall-count">0</span>)
+                </button>
+            </div>
+
+
+
+            <!-- Stock Navigation Menu -->
+            <div id="stock-nav-menu-container" style="display: none; padding: 0 0.75rem 0.75rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 0.75rem;">
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: var(--accent-primary); font-weight: 600; font-size: 0.82rem;">
+                    <i class="fa-solid fa-compass"></i>
+                    <span>Menu Điều Hướng Dashboard (<span id="stock-nav-ticker-label">TCB</span>)</span>
+                </div>
+                <div class="stock-nav-menu">
+                    <button class="stock-nav-item" onclick="scrollToStockSection('stock-section-chart')">
+                        <i class="fa-solid fa-chart-line"></i> <span>Biểu Đồ & Chỉ Báo</span>
+                    </button>
+                    <button class="stock-nav-item" onclick="scrollToStockSection('stock-section-summary')">
+                        <i class="fa-solid fa-brain"></i> <span>Luận Điểm & Điểm AI</span>
+                    </button>
+                    <button class="stock-nav-item" onclick="scrollToStockSection('actionable-advice-section')">
+                        <i class="fa-solid fa-lightbulb"></i> <span>Chiến Lược Giao Dịch</span>
+                    </button>
+                    <button class="stock-nav-item" onclick="scrollToStockSection('stock-section-forecast')">
+                        <i class="fa-solid fa-robot"></i> <span>Dự Báo T+5</span>
+                    </button>
+                    <button class="stock-nav-item" onclick="scrollToStockSection('model-comparison-section')">
+                        <i class="fa-solid fa-scale-balanced"></i> <span>So Sánh Mô Hình</span>
+                    </button>
+                    <button class="stock-nav-item" onclick="scrollToStockSection('prediction-verification-section')">
+                        <i class="fa-solid fa-circle-check"></i> <span>Kiểm Chứng Dự Đoán</span>
+                    </button>
+                    <button class="stock-nav-item" onclick="scrollToStockSection('stock-section-stats')" style="grid-column: span 2;">
+                        <i class="fa-solid fa-table"></i> <span>Chỉ Số Cơ Bản & Thống Kê</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Market Tab (VN100 / VNAll) -->
+            <div id="market-tab-content" style="display: none;">
+                <div class="inline-search">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input type="text" id="sidebar-search" placeholder="Lọc nhanh mã cổ phiếu..." oninput="filterMarketData()" autocomplete="off">
+                </div>
+
+                <div class="sort-row">
+                    <button class="sort-btn active" id="sort-alphabetical" onclick="setMarketSort('alphabetical')">
+                        <i class="fa-solid fa-arrow-down-a-z"></i> A-Z
+                    </button>
+                    <button class="sort-btn" id="sort-top-gainers" onclick="setMarketSort('gainers')">
+                        <i class="fa-solid fa-arrow-trend-up"></i> Tăng
+                    </button>
+                    <button class="sort-btn" id="sort-top-losers" onclick="setMarketSort('losers')">
+                        <i class="fa-solid fa-arrow-trend-down"></i> Giảm
+                    </button>
+                </div>
+
+                <div class="table-container" style="max-height: 580px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th scope="col">Mã</th>
+                                <th scope="col">Giá khớp</th>
+                                <th scope="col">Thay đổi</th>
+                                <th scope="col" style="text-align:right">+WL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="market-table-body">
+                            <!-- Dynamic -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Watchlist Tab -->
+            <div id="watchlist-tab-content">
+                <!-- Watchlist sort row -->
+                <div class="sort-row" id="wl-sort-row">
+                    <button class="sort-btn active" id="wl-sort-alpha" onclick="setWatchlistSort('alpha')">
+                        <i class="fa-solid fa-arrow-down-a-z"></i> A-Z
+                    </button>
+                    <button class="sort-btn" id="wl-sort-change" onclick="setWatchlistSort('change')">
+                        <i class="fa-solid fa-percent"></i> % Thay đổi
+                    </button>
+                    <button class="sort-btn" id="sort-ai-score" onclick="setWatchlistSort('score')">
+                        <i class="fa-solid fa-brain"></i> AI Score
+                    </button>
+                </div>
+
+                <div class="table-container" style="max-height: 600px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th scope="col">Mã</th>
+                                <th scope="col">Giá</th>
+                                <th scope="col">% Ngày</th>
+                                <th scope="col">AI Score</th>
+                                <th scope="col">Tín hiệu</th>
+                                <th scope="col" style="text-align:right">Xóa</th>
+                            </tr>
+                        </thead>
+                        <tbody id="watchlist-table-body">
+                            <!-- Dynamic -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+
+{% endblock %}
+
+{% block content %}
+<!-- Stock Empty Detail Panel -->
+<div id="empty-detail-message" class="empty-panel" style="display:flex; flex-direction:column; justify-content:center; align-items:center; height:100%; text-align:center; padding:2rem; color:var(--text-muted);">
+    <i class="fa-solid fa-chart-line" style="font-size:3.5rem; margin-bottom:1.5rem; color:rgba(255,255,255,0.05); filter:drop-shadow(0 0 15px rgba(96,165,250,0.1));"></i>
+    <h3 style="font-family:'Outfit'; font-size:1.15rem; font-weight:600; color:var(--text-primary); margin-bottom:0.5rem;">Chọn Mã Cổ Phiếu Phân Tích</h3>
+    <p style="font-size:0.8rem; max-width:280px; line-height:1.5;">Bấm chọn một mã cổ phiếu từ danh sách Watchlist hoặc VN100 ở thanh bên trái để xem biểu đồ và khuyến nghị AI chi tiết.</p>
+</div>
+            <div id="detail-content" class="detail-panel" style="display:none;">
+
+                <!-- Header -->
+                <div class="detail-ticker-header">
+                    <div class="detail-title-block">
+                        <h3 id="detail-ticker-name">TCB</h3>
+                        <div class="source-tag">
+                            <i class="fa-solid fa-database" style="font-size: 0.6rem;"></i>
+                            <span id="detail-data-source">Snapshot (VNDirect)</span>
+                        </div>
+                    </div>
+                    <div class="detail-price-block">
+                        <div class="detail-current-price" id="detail-price-val">48,500đ</div>
+                        <div class="detail-change" id="detail-price-change">
+                            <span id="detail-change-val">+500</span>
+                            <span id="detail-change-pct">(+1.04%)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Unpredicted State Card -->
+                <div id="ai-unpredicted-state" class="unpredicted-card">
+                    <div class="unpredicted-brain">
+                        <i class="fa-solid fa-brain"></i>
+                    </div>
+                    <div>
+                        <h4>Sẵn sàng Phân Tích AI cho <strong id="unpredicted-ticker-label">...</strong></h4>
+                        <p>Hệ thống sẽ crawl dữ liệu lịch sử 365 ngày, tính toán RSI/MACD/BB và chạy mô hình Random Forest &amp; Linear Regression để dự đoán xu hướng giá.</p>
+                    </div>
+                    <button class="btn btn-primary" onclick="runPredictionForActiveTicker()" id="btn-run-predict">
+                        <i class="fa-solid fa-circle-play"></i>
+                        <span>Bắt đầu Phân Tích AI</span>
+                    </button>
+                </div>
+
+                <!-- Predicted View -->
+                <div id="ai-predicted-view" style="display:none; flex-direction:column; gap:1.25rem;">
+
+                    <!-- Chart controls + tabs -->
+                    <div id="stock-section-chart" class="forecast-section">
+                        <div class="chart-controls">
+                            <div class="tab-group">
+                                <button class="tab-btn active" onclick="switchChartTab('price')" id="tab-price">Giá &amp; Dự đoán</button>
+                                <button class="tab-btn" onclick="switchChartTab('rsi')" id="tab-rsi">RSI (14)</button>
+                                <button class="tab-btn" onclick="switchChartTab('macd')" id="tab-macd">MACD</button>
+                            </div>
+
+                            <div style="display:flex; align-items:center; gap:0.75rem; flex-wrap:wrap;">
+                                <!-- BB Toggle (visible only in price tab) -->
+                                <label class="bb-toggle" id="bb-toggle-wrap" title="Hiển thị Bollinger Bands">
+                                    <input type="checkbox" id="bb-toggle" onchange="toggleBollingerBands(this.checked)">
+                                    <span class="toggle-track"></span>
+                                    <span style="font-size:0.72rem; color:var(--text-muted); font-weight:600;">Bollinger Bands</span>
+                                </label>
+
+                                <!-- Model select -->
+                                <div class="model-select-wrap">
+                                    <span class="model-select-label"><i class="fa-solid fa-brain" style="color:#60a5fa;margin-right:0.2rem;"></i>Mô hình:</span>
+                                    <select id="model-select" onchange="changePredictionModel(this.value)">
+                                        <option value="random_forest" selected>🧠 Random Forest</option>
+                                        <option value="linear_regression">📈 Linear Regression</option>
+                                        <option value="mlp">🧠 MLP Neural Network (Học Sâu)</option>
+                                        <option value="xgboost">🚀 XGBoost Regressor</option>
+                                        <option value="lstm">🧠 Mạng LSTM (Chuỗi Thời Gian)</option>
+                                        <option value="ensemble">✨ Ensemble Hybrid</option>
+                                    </select>
+
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="chart-wrapper">
+                            <canvas id="main-stock-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Summary: Score Gauge + Reasons -->
+                    <div id="stock-section-summary" class="summary-card">
+                        <!-- Gauge -->
+                        <div class="score-gauge-wrap">
+                            <div class="score-svg-container">
+                                <svg class="score-svg" viewBox="0 0 130 130">
+                                    <circle class="score-track" cx="65" cy="65" r="55"></circle>
+                                    <circle class="score-fill" id="score-meter-fill" cx="65" cy="65" r="55"></circle>
+                                </svg>
+                                <div class="score-center">
+                                    <span class="score-number" id="detail-score-val">0.0</span>
+                                    <span class="score-denom">/ 5.0</span>
+                                </div>
+                            </div>
+                            <div id="rec-badge-large" class="rec-badge-large hold">
+                                <i class="fa-solid fa-circle-info"></i>
+                                <span id="rec-badge-label">THEO DÕI</span>
+                            </div>
+                        </div>
+
+                        <!-- Reasons -->
+                        <div class="reasons-wrap">
+                            <h4>
+                                <i class="fa-solid fa-magnifying-glass-chart" style="color:var(--accent-primary)"></i>
+                                <span>Luận Điểm Phân Tích</span>
+                            </h4>
+                            <ul class="reasons-list" id="detail-reasons-list"></ul>
+                        </div>
+                    </div>
+                    
+                    <!-- Actionable Advice & Buy Timing -->
+                    <div class="forecast-section" id="actionable-advice-section">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-circle-check" style="color:var(--accent-primary)"></i>
+                            <span>Chiến Lược Giao Dịch & Khuyến Nghị Thời Điểm</span>
+                        </div>
+                        <div class="advice-container">
+                            <div class="advice-row">
+                                <div class="advice-card" id="advice-conclusion-card">
+                                    <span class="advice-card-label">Kết Luận Hành Động</span>
+                                    <div class="advice-card-val" id="advice-conclusion-val">-</div>
+                                    <span class="advice-card-sub" id="advice-conclusion-sub">-</span>
+                                </div>
+                                <div class="advice-card hold-advice" id="advice-timing-card">
+                                    <span class="advice-card-label">Thời Điểm Mua Tối Ưu</span>
+                                    <div class="advice-card-val" id="advice-timing-val">-</div>
+                                    <span class="advice-card-sub" id="advice-timing-sub">-</span>
+                                </div>
+                            </div>
+                            <div class="advice-details-grid">
+                                <div class="advice-detail-item">
+                                    <span class="item-label">Giá Dự Kiến Phiên T+1</span>
+                                    <span class="item-value" id="advice-next-price-val">-</span>
+                                </div>
+                                <div class="advice-detail-item">
+                                    <span class="item-label">Vùng Giá Mua Khuyến Nghị</span>
+                                    <span class="item-value" id="advice-buy-range-val">-</span>
+                                </div>
+                                <div class="advice-detail-item">
+                                    <span class="item-label">Dự Kiến Lợi Nhuận (T+5)</span>
+                                    <span class="item-value text-up" id="advice-expected-profit-val">-</span>
+                                </div>
+                                <div class="advice-detail-item">
+                                    <span class="item-label">Ngưỡng Cắt Lỗ Khuyến Nghị</span>
+                                    <span class="item-value text-down" id="advice-stop-loss-val">-</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Forecast Cards -->
+                    <div id="stock-section-forecast" class="forecast-section">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-robot" style="color:var(--accent-primary)"></i>
+                            <span id="forecast-model-label">Dự Báo Xu Hướng 1 Tuần (5 Phiên Giao Dịch)</span>
+                        </div>
+                        <div class="forecast-grid" id="detail-forecast-grid"></div>
+                    </div>
+
+                    <!-- Model Comparison Section -->
+                    <div class="forecast-section" id="model-comparison-section">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-square-poll-horizontal" style="color:var(--accent-primary)"></i>
+                            <span>So Sánh Kết Quả 3 Mô Hình Dự Đoán</span>
+                        </div>
+                        <div class="table-container" style="overflow-x: auto;">
+                            <table id="model-comparison-table">
+                                <thead>
+                                    <tr>
+                                        <th>Mô Hình</th>
+                                        <th>Khuyến Nghị</th>
+                                        <th>Điểm Số AI</th>
+                                        <th>Xu Hướng</th>
+                                        <th>Biến Động T+5</th>
+                                        <th>Giá Dự Báo T+5</th>
+                                        <th>Độ Tin Cậy R²</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="model-comparison-tbody">
+                                    <!-- Dynamic rows will be inserted here -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div id="model-comparison-note" style="display:none;font-size:0.72rem;color:var(--text-muted);margin-top:0.6rem;line-height:1.4;background:rgba(245,158,11,0.03);border:1px solid rgba(245,158,11,0.15);padding:0.5rem;border-radius:4px;">
+                            <i class="fa-solid fa-circle-exclamation" style="color:#f59e0b;margin-right:0.2rem"></i>
+                            <span>Lưu ý: Do mã cổ phiếu này không đủ dữ liệu lịch sử dài hạn (yêu cầu tối thiểu 50 phiên giao dịch có đầy đủ SMA50), mô hình Random Forest đã tự động chuyển sang cấu hình dự phòng (Linear Regression). Vì vậy kết quả của 3 mô hình tạm thời giống nhau.</span>
+                        </div>
+                    </div>
+
+                    <!-- Prediction Verification Section -->
+                    <div class="forecast-section" id="prediction-verification-section">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-gauge-high" style="color:var(--accent-primary)"></i>
+                            <span>Kiểm Chứng Dự Đoán T+1 Gần Nhất</span>
+                        </div>
+                        <div class="table-container" style="overflow-x: auto;">
+                            <table id="prediction-verification-table">
+                                <thead>
+                                    <tr>
+                                        <th>Phiên & Mô Hình</th>
+                                        <th>Giá Dự Báo T+1</th>
+                                        <th>Giá Thực Tế</th>
+                                        <th>Chênh Lệch / Sai Số</th>
+                                        <th>Đánh Giá</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="prediction-verification-tbody">
+                                    <!-- Dynamic rows will be inserted here -->
+                                </tbody>
+                            </table>
+                        </div>
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:0.6rem;line-height:1.4;">
+                            <i class="fa-solid fa-circle-info" style="color:var(--accent-primary);margin-right:0.2rem"></i>
+                            <span>Kiểm chứng dự đoán T+1 thực tế ngày hôm nay (live) hoặc phiên lịch sử gần nhất bằng cách chạy dự báo trên tập dữ liệu trước đó.</span>
+                        </div>
+                    </div>
+
+                    <!-- Stats Grid Section -->
+                    <div class="forecast-section" id="stock-section-stats">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-table" style="color:var(--accent-primary)"></i>
+                            <span>Chỉ Số Cơ Bản & Thống Kê Giao Dịch</span>
+                        </div>
+                        <div class="stats-grid">
+                            <div class="stat-card">
+                                <div class="stat-card-header">
+                                    <span class="label">Khối Lượng GD</span>
+                                    <span class="stat-icon stat-icon-vol"><i class="fa-solid fa-chart-bar"></i></span>
+                                </div>
+                                <span class="value" id="stat-volume">-</span>
+                                <span class="stat-tooltip">Tổng KL khớp lệnh phiên gần nhất</span>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-header">
+                                    <span class="label">SMA (20)</span>
+                                    <span class="stat-icon stat-icon-sma"><i class="fa-solid fa-wave-square"></i></span>
+                                </div>
+                                <span class="value" id="stat-sma20">-</span>
+                                <span class="stat-tooltip">Đường trung bình 20 phiên</span>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-header">
+                                    <span class="label">Độ Tin Cậy R²</span>
+                                    <span class="stat-icon stat-icon-r2"><i class="fa-solid fa-percent"></i></span>
+                                </div>
+                                <span class="value" id="stat-r2">-</span>
+                                <span class="stat-tooltip">R² của mô hình dự báo (càng gần 1 càng tốt)</span>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-card-header">
+                                    <span class="label">Biến Động Dự Báo</span>
+                                    <span class="stat-icon stat-icon-ml"><i class="fa-solid fa-arrow-trend-up"></i></span>
+                                </div>
+                                <span class="value" id="stat-ml-change">-</span>
+                                <span class="stat-tooltip">% thay đổi kỳ vọng theo mô hình AI</span>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+                <!-- /ai-predicted-view -->
+
+            </div>
+            <!-- /detail-content -->
+
+            <!-- Gold Dashboard content -->
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/stocks.js"></script>
+{% endblock %}

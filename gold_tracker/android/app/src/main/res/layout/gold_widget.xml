@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="12dp"
+    android:background="#1E293B"
+    android:gravity="center_vertical">
+
+    <!-- Header Section (Vertical stack to prevent overlapping in 2x2 widget) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginBottom="6dp">
+
+        <TextView
+            android:id="@+id/widget_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="VÀNG THẾ GIỚI"
+            android:textColor="#F59E0B"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:ellipsize="end"
+            android:singleLine="true"/>
+
+        <TextView
+            android:id="@+id/widget_updated_time"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="--:--"
+            android:textColor="#94A3B8"
+            android:textSize="9sp"
+            android:ellipsize="end"
+            android:singleLine="true"/>
+    </LinearLayout>
+
+    <!-- Divider using FrameLayout as View is not supported in RemoteViews -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#334155"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Price Section (Vertical stack to prevent overlapping) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginBottom="6dp">
+
+        <TextView
+            android:id="@+id/widget_world_price"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="-,--- USD"
+            android:textColor="#F8FAFC"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:ellipsize="end"
+            android:singleLine="true"/>
+
+        <TextView
+            android:id="@+id/widget_world_change"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="0.00%"
+            android:textColor="#34D399"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:ellipsize="end"
+            android:singleLine="true"/>
+    </LinearLayout>
+
+    <!-- Yesterday Price -->
+    <TextView
+        android:id="@+id/widget_yesterday_price"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Hôm trước: -- USD"
+        android:textColor="#94A3B8"
+        android:textSize="10sp"
+        android:ellipsize="end"
+        android:singleLine="true"/>
+
+</LinearLayout>

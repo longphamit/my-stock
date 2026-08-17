@@ -1,0 +1,430 @@
+{% extends "base.html" %}
+
+{% block sidebar %}
+<div class="panel-header">
+    <h2 id="sidebar-panel-header">
+        <i class="fa-solid fa-coins" style="color: #fbbf24"></i>
+        <span>Giá Vàng &amp; Vĩ Mô</span>
+    </h2>
+    <button class="btn-refresh" onclick="refreshGoldAnalysis()" id="refresh-btn" title="Làm mới giá vàng">
+        <i class="fa-solid fa-rotate"></i>
+        <span>Tải lại</span>
+    </button>
+</div>
+            <!-- Gold Tab Content (Sidebar) -->
+            <div id="gold-tab-content" style="display: block; padding: 0.75rem 0.5rem 0.75rem 0.5rem;">
+                <!-- Gold Navigation Menu -->
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #fbbf24; font-weight: 600; font-size: 0.82rem;">
+                    <i class="fa-solid fa-compass"></i>
+                    <span>Menu Điều Hướng Dashboard</span>
+                </div>
+                <div class="gold-nav-menu">
+                    <button class="gold-nav-item" onclick="scrollToGoldSection('gold-section-prices')">
+                        <i class="fa-solid fa-coins"></i> <span>1. Giá Vàng</span>
+                    </button>
+                    <button class="gold-nav-item" onclick="scrollToGoldSection('gold-section-macro')">
+                        <i class="fa-solid fa-earth-americas"></i> <span>2. Yếu Tố Vĩ Mô</span>
+                    </button>
+                    <button class="gold-nav-item" onclick="selectCalendarDashboard()">
+                        <i class="fa-solid fa-calendar-days"></i> <span>3. Lịch Sự Kiện</span>
+                    </button>
+                    <button class="gold-nav-item" onclick="scrollToGoldSection('gold-forecast-section')">
+                        <i class="fa-solid fa-robot"></i> <span>4. Dự Báo AI Vàng</span>
+                    </button>
+                    <button class="gold-nav-item" onclick="scrollToGoldSection('swing-calculator-section')">
+                        <i class="fa-solid fa-calculator"></i> <span>5. Máy Tính Lướt Sóng</span>
+                    </button>
+                </div>
+
+                <!-- Geopolitics & Conflict Section -->
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #fbbf24; font-weight: 600; font-size: 0.82rem; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.8rem; margin-top: 0.8rem;">
+                    <span style="display: flex; align-items: center; gap: 0.5rem;">
+                        <i class="fa-solid fa-shield-halved"></i>
+                        <span>Tin Chiến Sự Địa Chính Trị</span>
+                    </span>
+                    <span style="font-size: 0.68rem; padding: 0.1rem 0.35rem; background: rgba(16, 185, 129, 0.1); color: #34d399; border-radius: 4px; font-weight: 600;">Thuận chiều (+)</span>
+                </div>
+                <div style="font-size: 0.68rem; color: var(--text-muted); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.25rem;">
+                    <i class="fa-solid fa-filter" style="font-size: 0.6rem; color: #fbbf24;"></i>
+                    <span>Bộ lọc: Mỹ, Iran, Israel, Nga, Ukraine, Lebanon, Trung Quốc</span>
+                </div>
+                <!-- Dynamic Geopolitical Conflicts List -->
+                <div id="macro-conflicts-list" style="display: flex; flex-direction: column; gap: 0.55rem; margin-bottom: 0.6rem; max-height: 250px; overflow-y: auto; padding-right: 0.25rem;">
+                    <div style="font-size: 0.78rem; color: var(--text-muted); text-align: center; padding: 1rem;">Đang tải diễn biến xung đột mới nhất...</div>
+                </div>
+                <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4; margin: 0 0 1.2rem 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem; font-style: italic;">
+                    Chiến tranh, bất ổn ➔ Nhu cầu trú ẩn tăng ➔ Vàng tăng; Hòa bình ➔ Vàng giảm.
+                </p>
+
+                <!-- News Section -->
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #fbbf24; font-weight: 600; font-size: 0.82rem; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.8rem; margin-top: 0.8rem;">
+                    <i class="fa-solid fa-newspaper"></i>
+                    <span>Tin Tức Vĩ Mô & Giá Vàng</span>
+                </div>
+                <div id="gold-sidebar-news-list" style="max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.75rem; padding-right: 0.25rem;">
+                    <!-- Dynamic news list -->
+                </div>
+            </div>
+
+            <!-- Vietlott Tab Content (Sidebar) -->
+            <div id="vietlott-tab-content" style="display: none; padding: 0.75rem 0.5rem 0.75rem 0.5rem;">
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #f43f5e; font-weight: 600; font-size: 0.82rem;">
+                    <i class="fa-solid fa-compass"></i>
+                    <span>Danh Mục Trò Chơi Vietlott</span>
+                </div>
+                <div class="vietlott-nav-menu">
+                    <button class="vietlott-nav-item active" id="vietlott-menu-power655" onclick="selectVietlottGame('power655')">
+                        <i class="fa-solid fa-ticket"></i> <span>Power 6/55</span>
+                    </button>
+                    <button class="vietlott-nav-item" id="vietlott-menu-mega645" onclick="selectVietlottGame('mega645')">
+                        <i class="fa-solid fa-ticket"></i> <span>Mega 6/45</span>
+                    </button>
+                    <button class="vietlott-nav-item" id="vietlott-menu-keno" onclick="selectVietlottGame('keno')">
+                        <i class="fa-solid fa-ticket"></i> <span>Keno</span>
+                    </button>
+                    <button class="vietlott-nav-item" id="vietlott-menu-bingo18" onclick="selectVietlottGame('bingo18')">
+                        <i class="fa-solid fa-dice"></i> <span>Bingo 18</span>
+                    </button>
+                    <button class="vietlott-nav-item" id="vietlott-menu-max3d" onclick="selectVietlottGame('max3d')">
+                        <i class="fa-solid fa-cubes"></i> <span>Max 3D</span>
+                    </button>
+                    <button class="vietlott-nav-item" id="vietlott-menu-max3dpro" onclick="selectVietlottGame('max3dpro')">
+                        <i class="fa-solid fa-cubes-stacked"></i> <span>Max 3D Pro</span>
+                    </button>
+                    <button class="vietlott-nav-item" id="vietlott-menu-power535" onclick="selectVietlottGame('power535')">
+                        <i class="fa-solid fa-circle-dot"></i> <span>Power 5/35</span>
+                    </button>
+                </div>
+                
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #f43f5e; font-weight: 600; font-size: 0.82rem; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.8rem; margin-top: 0.8rem;">
+                    <i class="fa-solid fa-circle-info"></i>
+                    <span>Thông Tin &amp; Thống Kê</span>
+                </div>
+                <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.4; margin: 0 0 1.2rem 0; font-style: italic;">
+                    Hệ thống tự động đồng bộ kết quả xổ số từ nguồn vietvudanh/vietlott-data. Cung cấp ma trận tần suất, bóng nóng/lạnh và thống kê chi tiết từng vị trí số.
+                </p>
+            </div>
+        </section>
+
+        <!-- RIGHT: Chart & Analysis -->
+
+{% endblock %}
+
+{% block content %}
+            <div id="gold-dashboard-content" class="detail-panel" style="display:none;">
+                <!-- Header -->
+                <div class="detail-ticker-header">
+                    <div class="detail-title-block">
+                        <div style="display: flex; align-items: center; gap: 0.75rem;">
+                            <h3 style="margin: 0;">Bảng Theo Dõi Giá Vàng</h3>
+                            <span id="market-status-badge" style="font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 700; background: rgba(255,255,255,0.05); color: var(--text-secondary); border: 1px solid rgba(255,255,255,0.08);">--</span>
+                        </div>
+                        <div style="display: flex; gap: 0.8rem; margin-top: 0.35rem; font-size: 0.72rem; color: var(--text-muted);">
+                            <div class="source-tag" style="margin: 0;">
+                                <i class="fa-solid fa-earth-americas" style="font-size: 0.65rem;"></i>
+                                <span>Nguồn: giavang.org</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <i class="fa-solid fa-clock" style="font-size: 0.65rem; color: #60a5fa;"></i>
+                                <span id="market-us-time" style="font-family: 'JetBrains Mono', monospace; font-weight: 600;">Giờ Mỹ: --:--:--</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="detail-price-block">
+                        <div class="detail-current-price" id="gold-world-price-val">-</div>
+                        <div class="detail-change" id="gold-world-change">
+                            <span id="gold-world-change-val">-</span>
+                            <span id="gold-world-change-pct">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gold Sub Tabs -->
+                <div class="tab-group" id="gold-sub-tabs" style="align-self: flex-start; margin-bottom: 0.25rem; width: auto; min-width: 320px; display: none;">
+                    <button class="tab-btn active" onclick="switchGoldSubTab('prices')" id="tab-gold-prices" style="flex: 1; text-align: center;">
+                        Bảng Giá Hiện Tại
+                    </button>
+                    <button class="tab-btn" onclick="switchGoldSubTab('forecast')" id="tab-gold-forecast" style="flex: 1; text-align: center;">
+                        Dự Báo &amp; Đánh Giá
+                    </button>
+                </div>
+
+                <!-- Gold Dashboard Loader -->
+                <div id="gold-dashboard-loader" class="loading-overlay" style="display:none;">
+                    <div class="spinner"></div>
+                    <p style="color: var(--text-secondary); font-size: 0.88rem;">Đang tải thông tin giá vàng trực tuyến...</p>
+                </div>
+
+                <!-- Gold Dashboard Body -->
+                <div id="gold-dashboard-body">
+                    <div id="gold-subview-prices">
+                        <!-- Cards Grid -->
+                        <div id="gold-section-prices" class="stats-grid" style="margin-bottom: 1.5rem;">
+                        <div class="stat-card" style="background: linear-gradient(135deg, rgba(251, 191, 36, 0.05) 0%, rgba(217, 119, 6, 0.05) 100%); border-color: rgba(251, 191, 36, 0.15);">
+                            <div class="stat-card-header">
+                                <span class="label" style="color: #fbbf24; font-weight: 600;">Vàng TG Quy Đổi</span>
+                                <span class="stat-icon" style="background: rgba(251, 191, 36, 0.1); color: #fbbf24; padding: 0.2rem 0.4rem; border-radius: 4px;"><i class="fa-solid fa-coins"></i></span>
+                            </div>
+                            <span class="value" id="gold-world-converted-cay" style="font-size: 1.35rem; line-height: 2rem;">-</span>
+                            <span class="stat-tooltip">Giá quy đổi: 1 cây = 1.20565 Ounce quy theo tỷ giá Vietcombank</span>
+                        </div>
+
+                        <div class="stat-card" style="background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%); border-color: rgba(59, 130, 246, 0.15);">
+                            <div class="stat-card-header">
+                                <span class="label" style="color: #60a5fa; font-weight: 600;">Vàng Miếng SJC (Mua - Bán)</span>
+                                <span class="stat-icon" style="background: rgba(59, 130, 246, 0.1); color: #60a5fa; padding: 0.2rem 0.4rem; border-radius: 4px;"><i class="fa-solid fa-cubes"></i></span>
+                            </div>
+                            <span class="value" id="gold-sjc-bar-prices" style="font-size: 1.35rem; line-height: 2rem;">-</span>
+                            <span class="stat-tooltip" id="gold-sjc-bar-time">Cập nhật lúc: -</span>
+                        </div>
+
+                        <div class="stat-card" style="background: linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(5, 150, 105, 0.05) 100%); border-color: rgba(16, 185, 129, 0.15);">
+                            <div class="stat-card-header">
+                                <span class="label" style="color: #34d399; font-weight: 600;">Vàng Nhẫn SJC (Mua - Bán)</span>
+                                <span class="stat-icon" style="background: rgba(16, 185, 129, 0.1); color: #34d399; padding: 0.2rem 0.4rem; border-radius: 4px;"><i class="fa-solid fa-circle-notch"></i></span>
+                            </div>
+                            <span class="value" id="gold-sjc-ring-prices" style="font-size: 1.35rem; line-height: 2rem;">-</span>
+                            <span class="stat-tooltip" id="gold-sjc-ring-time">Cập nhật lúc: -</span>
+                        </div>
+
+                        <div class="stat-card" id="gold-premium-card" style="background: linear-gradient(135deg, rgba(239, 68, 68, 0.05) 0%, rgba(220, 38, 38, 0.05) 100%); border-color: rgba(239, 68, 68, 0.15);">
+                            <div class="stat-card-header">
+                                <span class="label" id="gold-premium-label" style="color: #f87171; font-weight: 600;">Chênh Lệch SJC - TG</span>
+                                <span class="stat-icon" style="background: rgba(239, 68, 68, 0.1); color: #f87171; padding: 0.2rem 0.4rem; border-radius: 4px;"><i class="fa-solid fa-scale-balanced"></i></span>
+                            </div>
+                            <span class="value" id="gold-premium-val" style="font-size: 1.35rem; line-height: 2rem;">-</span>
+                            <span class="stat-tooltip">Chênh lệch giữa giá bán vàng miếng SJC và vàng thế giới quy đổi</span>
+                        </div>
+                    </div>
+
+
+
+                    <!-- TradingView Chart Widget Section -->
+                    <div id="gold-section-chart" class="forecast-section" style="margin-bottom: 1.5rem;">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-chart-line" style="color: #fbbf24;"></i>
+                            <span>Biểu Đồ Giá Vàng Thế Giới Trực Tuyến (XAU/USD)</span>
+                        </div>
+                        <!-- TradingView widget container -->
+                        <div style="height: 400px; width: 100%; border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--panel-border);">
+                            <div id="tradingview-gold-widget" style="height: 100%; width: 100%;">
+                                <!-- We will load this dynamically -->
+                            </div>
+                        </div>
+                    </div>
+
+
+
+
+
+                    <!-- Brand Comparison Table -->
+                    <div id="gold-section-brands" class="forecast-section" style="margin-bottom: 1.5rem;">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-shop" style="color: var(--accent-violet);"></i>
+                            <span>Bảng So Sánh Giá Vàng Tại Các Tổ Chức Lớn</span>
+                        </div>
+                        <div class="table-container" style="max-height: 350px; overflow-y: auto;">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Khu Vực</th>
+                                        <th>Thương Hiệu</th>
+                                        <th style="text-align: right;">Mua Vào (triệu/lượng)</th>
+                                        <th style="text-align: right;">Bán Ra (triệu/lượng)</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gold-brands-tbody">
+                                    <!-- Dynamic brand rows -->
+                                </tbody>
+                            </table>
+                        </div>
+                        </div>
+                    </div>
+                    </div> <!-- /gold-subview-prices -->
+
+                    <div id="gold-subview-forecast" style="display: none;">
+                    <!-- Macro Factors Impact Section -->
+                    <div id="gold-section-macro" class="forecast-section" style="margin-bottom: 1.5rem;">
+                        <div class="forecast-title">
+                            <i class="fa-solid fa-earth-americas" style="color: #60a5fa;"></i>
+                            <span>Các Yếu Tố Vĩ Mô Tác Động Đến Giá Vàng (Nguồn Chính Phủ &amp; Thời Gian Thực)</span>
+                        </div>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem;">
+                            <!-- FED Card -->
+                            <div style="padding: 1rem; background: rgba(59, 130, 246, 0.03); border: 1px solid rgba(59, 130, 246, 0.12); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #60a5fa; font-size: 0.9rem;"><i class="fa-solid fa-bank" style="margin-right: 0.35rem;"></i>Lãi Suất FED (Fed Funds Rate)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(239, 68, 68, 0.1); color: #f87171; border-radius: 4px; font-weight: 600;">Nghịch chiều (-)</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-fed-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(244, 63, 94, 0.1); color: #f43f5e;">Giảm</span>
+                                        <span id="macro-fed-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--%</span>
+                                        <span id="macro-fed-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">FED tăng lãi suất ➔ Vàng giảm; FED hạ lãi suất ➔ Vàng tăng</p>
+                            </div>
+
+                            <!-- CPI Card -->
+                            <div style="padding: 1rem; background: rgba(16, 185, 129, 0.03); border: 1px solid rgba(16, 185, 129, 0.12); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #34d399; font-size: 0.9rem;"><i class="fa-solid fa-chart-area" style="margin-right: 0.35rem;"></i>CPI (Lạm Phát Mỹ)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(16, 185, 129, 0.1); color: #34d399; border-radius: 4px; font-weight: 600;">Thuận chiều (+)</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-cpi-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(244, 63, 94, 0.1); color: #f43f5e;">Giảm</span>
+                                        <span id="macro-cpi-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--%</span>
+                                        <span id="macro-cpi-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">CPI tăng ➔ Vàng tăng; CPI giảm ➔ Vàng giảm</p>
+                            </div>
+
+                            <!-- NFP Card -->
+                            <div style="padding: 1rem; background: rgba(139, 92, 246, 0.03); border: 1px solid rgba(139, 92, 246, 0.12); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #a78bfa; font-size: 0.9rem;"><i class="fa-solid fa-briefcase" style="margin-right: 0.35rem;"></i>Việc Làm Phi Nông Nghiệp (NFP)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(239, 68, 68, 0.1); color: #f87171; border-radius: 4px; font-weight: 600;">Nghịch chiều (-)</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-nfp-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(244, 63, 94, 0.1); color: #f43f5e;">Giảm</span>
+                                        <span id="macro-nfp-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--</span>
+                                        <span id="macro-nfp-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">NFP cao ➔ Vàng giảm; NFP thấp/xấu ➔ Vàng tăng</p>
+                            </div>
+
+                            <!-- Unemployment Card -->
+                            <div style="padding: 1rem; background: rgba(249, 115, 22, 0.03); border: 1px solid rgba(249, 115, 22, 0.12); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #fb923c; font-size: 0.9rem;"><i class="fa-solid fa-person-walking-luggage" style="margin-right: 0.35rem;"></i>Tỷ Lệ Thất Nghiệp Mỹ</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(16, 185, 129, 0.1); color: #34d399; border-radius: 4px; font-weight: 600;">Thuận chiều (+)</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-unemp-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(16, 185, 129, 0.1); color: #34d399;">Tăng</span>
+                                        <span id="macro-unemp-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--%</span>
+                                        <span id="macro-unemp-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">Thất nghiệp tăng ➔ Vàng tăng; Thất nghiệp giảm ➔ Vàng giảm</p>
+                            </div>
+
+                            <!-- New Home Sales Card -->
+                            <div style="padding: 1rem; background: rgba(236, 72, 153, 0.03); border: 1px solid rgba(236, 72, 153, 0.12); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #f472b6; font-size: 0.9rem;"><i class="fa-solid fa-house" style="margin-right: 0.35rem;"></i>Nhà Mới Bán Ra (New Home Sales)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(239, 68, 68, 0.1); color: #f87171; border-radius: 4px; font-weight: 600;">Nghịch chiều (-)</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-home-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(16, 185, 129, 0.1); color: #34d399;">Tăng</span>
+                                        <span id="macro-home-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--</span>
+                                        <span id="macro-home-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">Nhà bán tăng (kinh tế tốt) ➔ Vàng giảm; Nhà bán giảm (kinh tế xấu) ➔ Vàng tăng</p>
+                            </div>
+
+                            <!-- Crude Oil Card -->
+                            <div style="padding: 1rem; background: rgba(251, 146, 60, 0.03); border: 1px solid rgba(251, 146, 60, 0.12); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #fb923c; font-size: 0.9rem;"><i class="fa-solid fa-droplet" style="margin-right: 0.35rem;"></i>Giá Dầu Thô (WTI/Brent)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(251, 146, 60, 0.1); color: #fb923c; border-radius: 4px; font-weight: 600;">Phức tạp (~)</span>
+                                    </div>
+                                    <div style="display: flex; gap: 1.2rem; margin-bottom: 0.5rem; padding: 0.4rem 0.6rem; background: rgba(251,146,60,0.06); border-radius: 5px;">
+                                        <div>
+                                            <span style="font-size: 0.62rem; color: var(--text-muted); display: block;">WTI</span>
+                                            <span id="macro-oil-wti" style="font-size: 0.9rem; font-weight: 700; color: #fb923c; font-family: 'JetBrains Mono', monospace;">-- USD/thùng</span>
+                                        </div>
+                                        <div>
+                                            <span style="font-size: 0.62rem; color: var(--text-muted); display: block;">Brent</span>
+                                            <span id="macro-oil-brent" style="font-size: 0.9rem; font-weight: 700; color: #fbbf24; font-family: 'JetBrains Mono', monospace;">-- USD/thùng</span>
+                                        </div>
+                                        <div style="margin-left: auto; align-self: center;">
+                                            <a href="https://webgia.com/gia-xang-dau/dau-tho/" target="_blank" style="font-size: 0.6rem; color: var(--text-muted); text-decoration: none;">
+                                                <i class="fa-solid fa-arrow-up-right-from-square"></i> webgia.com
+                                            </a>
+                                        </div>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">Dầu tăng ➔ Lạm phát tăng ➔ Vàng tăng. Dầu giảm mạnh ➔ Suy thoái lo ngại ➔ Vàng tăng.</p>
+                            </div>
+
+                            <!-- SPDR Gold MiniShares (GLDM) & Gold Price Combined Chart Card (Macro Grid Item) -->
+                            <div style="grid-column: 1 / -1; padding: 1rem; background: rgba(251, 191, 36, 0.015); border: 1px solid rgba(251, 191, 36, 0.08); border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                                    <span style="font-weight: 700; color: var(--text-primary); font-size: 0.9rem;">
+                                        <i class="fa-solid fa-chart-line" style="margin-right: 0.35rem; color: #fbbf24;"></i>Đối Chiếu Biến Động Giá Vàng (XAU/USD) &amp; Quỹ SPDR Gold Trust - 30 Ngày Gần Nhất
+                                    </span>
+                                    <div style="display: flex; gap: 0.5rem;">
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(251, 191, 36, 0.1); color: #fbbf24; border-radius: 4px; font-weight: 600;">Quy đổi về đơn vị USD/ounce ($/oz)</span>
+                                    </div>
+                                </div>
+                                <div class="chart-wrapper" style="height: 280px; position: relative;">
+                                    <canvas id="gold-gld-comparison-chart"></canvas>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">
+                                    Biểu đồ so sánh chéo giá <strong>Vàng Thế Giới (USD/oz)</strong> với giá quy đổi tương đương của các quỹ ETF trên cùng thang đo: <br>
+                                    - <strong>Quỹ SPDR Gold MiniShares (GLDM)</strong>: 1 share tương đương 1/50 oz vàng, quy đổi bằng cách nhân 50.<br>
+                                    - <strong>Quỹ SPDR Gold Trust (GLD)</strong>: 1 share tương đương 1/10 oz vàng, quy đổi bằng cách nhân 10.
+                                </p>
+                            </div>
+
+                            <!-- DXY Chart Card (Macro Grid Item) -->
+                            <div style="grid-column: 1 / -1; padding: 1rem; background: rgba(96, 165, 250, 0.03); border: 1px solid rgba(96, 165, 250, 0.12); border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                                    <span style="font-weight: 700; color: #60a5fa; font-size: 0.9rem;">
+                                        <i class="fa-solid fa-dollar-sign" style="margin-right: 0.35rem;"></i>Biến Động Chỉ Số Dollar Index (DXY) - 30 Ngày Gần Nhất
+                                    </span>
+                                    <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(239, 68, 68, 0.1); color: #f87171; border-radius: 4px; font-weight: 600;">Nghịch chiều (-)</span>
+                                </div>
+                                <div class="chart-wrapper" style="height: 250px; position: relative;">
+                                    <canvas id="dxy-history-chart"></canvas>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">DXY tăng (USD mạnh lên) ➔ Sức ép giảm giá lên Vàng; DXY giảm (USD yếu đi) ➔ Động lực tăng giá cho Vàng</p>
+                            </div>
+
+                            <!-- Crude Oil Chart Card (Macro Grid Item) -->
+                            <div style="grid-column: 1 / -1; padding: 1rem; background: rgba(251, 146, 60, 0.03); border: 1px solid rgba(251, 146, 60, 0.12); border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                                    <span style="font-weight: 700; color: #fb923c; font-size: 0.9rem;">
+                                        <i class="fa-solid fa-droplet" style="margin-right: 0.35rem;"></i>Biến Động Giá Dầu Thô (Brent Crude) - 30 Ngày Gần Nhất
+                                    </span>
+                                    <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(251, 146, 60, 0.1); color: #fb923c; border-radius: 4px; font-weight: 600;">Phức tạp (~)</span>
+                                </div>
+                                <div class="chart-wrapper" style="height: 250px; position: relative;">
+                                    <canvas id="oil-history-chart"></canvas>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">Giá dầu tăng ➔ Gia tăng áp lực lạm phát vĩ mô ➔ Tác động đẩy giá vàng tăng lên trong trung và dài hạn</p>
+                            </div>
+
+                            <!-- DJI Chart Card (Macro Grid Item) -->
+                            <div style="grid-column: 1 / -1; padding: 1rem; background: rgba(16, 185, 129, 0.03); border: 1px solid rgba(16, 185, 129, 0.12); border-radius: 8px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                                    <span style="font-weight: 700; color: #34d399; font-size: 0.9rem;">
+                                        <i class="fa-solid fa-chart-line" style="margin-right: 0.35rem;"></i>Biến Động Chỉ Chỉ Số Dow Jones (DJI) - 6 Tháng Gần Nhất
+                                    </span>
+                                    <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(16, 185, 129, 0.1); color: #34d399; border-radius: 4px; font-weight: 600;">Phức tạp (~)</span>
+                                </div>
+                                <div class="chart-wrapper" style="height: 250px; position: relative;">
+                                    <canvas id="dji-history-chart"></canvas>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; margin-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">Tâm lý thị trường tích cực (Risk-on) ➔ Dòng tiền dịch chuyển sang chứng khoán ➔ Áp lực giảm lên Vàng; Thị trường lo ngại (Risk-off) ➔ Vàng tăng vai trò ẩn trú</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chọn Mô Hình AI & Dự Báo (Vàng Thế Giới) Container -->
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/gold_price.js?v={{ range(1, 100000) | random }}"></script>
+{% endblock %}

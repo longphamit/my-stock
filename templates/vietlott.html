@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+
+{% block sidebar %}
+
+<div class="panel-header">
+    <h2 id="sidebar-panel-header">
+        <i class="fa-solid fa-ticket" style="color: #f43f5e"></i>
+        <span>Phân Tích Xổ Số</span>
+    </h2>
+    <button class="btn-refresh" onclick="refreshVietlottData()" id="refresh-btn" title="Cập nhật kết quả">
+        <i class="fa-solid fa-rotate"></i>
+        <span>Đồng bộ</span>
+    </button>
+</div>
+<div style="padding: 0.75rem 0.5rem 0.75rem 0.5rem;">
+    <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #f43f5e; font-weight: 600; font-size: 0.82rem;">
+        <i class="fa-solid fa-compass"></i>
+        <span>Chọn Sản Phẩm Vietlott</span>
+    </div>
+    <div class="gold-nav-menu" style="display:flex; flex-direction:column; gap:0.5rem;">
+        <button class="gold-nav-item active" onclick="selectVietlottGame('mega645')" id="vl-item-mega645">
+            <i class="fa-solid fa-circle" style="color:#fbbf24"></i> <span>Mega 6/45</span>
+        </button>
+        <button class="gold-nav-item" onclick="selectVietlottGame('power655')" id="vl-item-power655">
+            <i class="fa-solid fa-circle" style="color:#f43f5e"></i> <span>Power 6/55</span>
+        </button>
+        <button class="gold-nav-item" onclick="selectVietlottGame('power535')" id="vl-item-power535">
+            <i class="fa-solid fa-circle" style="color:#34d399"></i> <span>Max 3D Pro / 5D</span>
+        </button>
+        <button class="gold-nav-item" onclick="selectVietlottGame('keno')" id="vl-item-keno">
+            <i class="fa-solid fa-circle" style="color:#60a5fa"></i> <span>Keno Tần Suất</span>
+        </button>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block content %}
+            <div id="vietlott-dashboard-content" class="detail-panel" style="display:none;">
+                <!-- Header -->
+                <div class="detail-ticker-header" style="margin-bottom: 1.5rem;">
+                    <div class="detail-title-block">
+                        <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                            <h3 id="vietlott-title" style="margin: 0; font-size: 1.35rem; font-weight: 700; color: #f43f5e;">--</h3>
+                            <span id="vietlott-game-badge" style="font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 700; background: rgba(244,63,94,0.1); color: #f43f5e; border: 1px solid rgba(244,63,94,0.2);">VIETLOTT</span>
+                            <span id="vietlott-sync-status" style="font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 700; background: rgba(16,185,129,0.1); color: #34d399; border: 1px solid rgba(16,185,129,0.2); display: none;">Đang đồng bộ...</span>
+                        </div>
+                        <div style="display: flex; gap: 0.8rem; margin-top: 0.35rem; font-size: 0.72rem; color: var(--text-muted); flex-wrap: wrap;">
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <i class="fa-solid fa-clock" style="font-size: 0.65rem; color: #60a5fa;"></i>
+                                <span>Cập nhật: <span id="vietlott-update-time" style="font-family: 'JetBrains Mono', monospace; font-weight: 600;">--</span></span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <i class="fa-solid fa-database" style="font-size: 0.65rem; color: #a78bfa;"></i>
+                                <span>Kỳ quay phân tích: <span id="vietlott-total-draws" style="font-family: 'JetBrains Mono', monospace; font-weight: 600;">--</span></span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Manual sync button -->
+                    <button class="btn-refresh" id="vietlott-manual-refresh-btn" onclick="refreshVietlottData()" style="padding: 0.5rem 0.8rem; font-size: 0.76rem; border-radius: 6px; display: flex; align-items: center; gap: 0.4rem; background: rgba(244,63,94,0.1); border-color: rgba(244,63,94,0.2); color: #f43f5e; font-weight: 600; cursor: pointer; transition: all 0.2s;">
+                        <i class="fa-solid fa-rotate" id="vietlott-refresh-icon"></i>
+                        <span>Làm Mới Dữ Liệu</span>
+                    </button>
+                </div>
+
+                <!-- Vietlott Dashboard Loader -->
+                <div id="vietlott-dashboard-loader" class="loading-overlay" style="position: relative; min-height: 200px; background: transparent; flex-direction: column; align-items: center; justify-content: center; width: 100%; display: none;">
+                    <div class="spinner" style="border-top-color: #f43f5e;"></div>
+                    <p style="color: var(--text-secondary); font-size: 0.88rem; margin-top: 1rem;">Đang tải và tính toán thống kê...</p>
+                </div>
+
+                <!-- Vietlott Dashboard Body -->
+                <div id="vietlott-dashboard-body">
+                    <!-- Vietlott Sub Tabs -->
+                    <div class="tab-group" id="vietlott-sub-tabs" style="margin-bottom: 1.25rem; display: flex; gap: 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 0.5rem;">
+                        <button class="tab-btn active" onclick="switchVietlottSubTab('stats')" id="tab-vietlott-stats" style="flex: 1; text-align: center; border-radius: 6px; padding: 0.5rem;">
+                            Thống Kê Tần Suất
+                        </button>
+                        <button class="tab-btn" onclick="switchVietlottSubTab('forecast')" id="tab-vietlott-forecast" style="flex: 1; text-align: center; border-radius: 6px; padding: 0.5rem; display: none;">
+                            <i class="fa-solid fa-brain"></i> Dự Báo AI
+                        </button>
+                    </div>
+
+                    <!-- Subview 1: Stats & History -->
+                    <div id="vietlott-subview-stats" style="display: block;">
+                        <!-- Row 1: Latest Draw Banner -->
+                        <div class="stats-grid" style="grid-template-columns: 1fr; margin-bottom: 1.5rem;" id="vietlott-latest-draw-section">
+                            <!-- Will be dynamically rendered -->
+                        </div>
+
+                        <!-- Row 2: KPI & Distribution Cards -->
+                        <div class="stats-grid" style="margin-bottom: 1.5rem;" id="vietlott-kpis-section">
+                            <!-- Will be dynamically rendered -->
+                        </div>
+
+                        <!-- Row 3: Heatmap Frequency Grid -->
+                        <div class="glass-panel" style="margin-bottom: 1.5rem; padding: 1.5rem;" id="vietlott-heatmap-section">
+                            <div class="panel-header" style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem;">
+                                <h4 style="margin: 0; font-size: 0.95rem; font-weight: 600; color: #f43f5e; display: flex; align-items: center; gap: 0.5rem;" id="vietlott-heatmap-title">
+                                    <i class="fa-solid fa-fire"></i> Ma Trận Tần Suất &amp; Thời Gian Vắng Bóng
+                                </h4>
+                                <div style="font-size: 0.72rem; color: var(--text-muted);" id="vietlott-heatmap-subtitle">
+                                    Màu đậm: hay ra gần đây | Số nhỏ bên dưới: số kỳ chưa về
+                                </div>
+                            </div>
+                            <div id="vietlott-heatmap-container">
+                                <!-- Dynamic Heatmap grid -->
+                            </div>
+                        </div>
+
+                        <!-- Row 4: Draw History Table -->
+                        <div class="glass-panel" style="padding: 1.5rem;">
+                            <div class="panel-header" style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem;">
+                                <h4 style="margin: 0; font-size: 0.95rem; font-weight: 600; color: #f43f5e; display: flex; align-items: center; gap: 0.5rem;">
+                                    <i class="fa-solid fa-list-check"></i> Lịch Sử Kết Quả Gần Đây (100 kỳ quay)
+                                </h4>
+                            </div>
+                            <div class="table-container" style="max-height: 400px; overflow-y: auto;">
+                                <table style="width: 100%; border-collapse: collapse;">
+                                    <thead>
+                                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left;">
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 15%;">Ngày</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 15%;">Kỳ Quay</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 50%;">Bộ Số Trúng Giải</th>
+                                            <th id="vietlott-history-extra-header" style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 20%;">Thông Tin Khác</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="vietlott-history-tbody">
+                                        <!-- Dynamic rows -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Subview 2: AI Forecast -->
+                    <div id="vietlott-subview-forecast" style="display: none;">
+                        <!-- AI Forecast Header / Overview -->
+                        <div class="glass-panel" style="margin-bottom: 1.5rem; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem;">
+                            <!-- Header with Model Selector -->
+                            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.75rem;">
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <i class="fa-solid fa-brain" style="color: #f43f5e; font-size: 1.1rem;"></i>
+                                    <h4 style="margin: 0; font-size: 0.95rem; font-weight: 600; color: #f43f5e;">Bộ Số May Mắn Gợi Ý bởi AI</h4>
+                                </div>
+                                <div class="model-select-container">
+                                    <label for="vietlott-model-select" style="font-size:0.75rem;color:var(--text-muted);margin-right:0.5rem;">Mô hình dự báo:</label>
+                                    <select id="vietlott-model-select" class="model-select" onchange="changeVietlottModel(this.value)" style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255,255,255,0.1); color: var(--text-primary); padding: 0.35rem 0.65rem; border-radius: 6px; font-size: 0.78rem; font-weight: 600; outline: none; cursor: pointer;">
+                                        <option value="ensemble" selected>✨ Ensemble Hybrid (Khuyên dùng)</option>
+                                        <option value="monte_carlo">🎲 Monte Carlo Simulator</option>
+                                        <option value="random_forest">🌲 Random Forest Classifier</option>
+                                        <option value="mlp">🧠 MLP Neural Network (Học sâu)</option>
+                                        <option value="xgboost">🚀 XGBoost Classifier</option>
+                                        <option value="linear_regression">📈 Hồi quy tuyến tính (LR)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <!-- Glowing 3D Balls Container -->
+                            <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 1.5rem; background: rgba(255,255,255,0.01); border-radius: 12px; border: 1px solid rgba(255,255,255,0.03); text-align: center;">
+                                <div style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 0.75rem;" id="vietlott-forecast-target-label">Bộ số gợi ý cho kỳ tiếp theo</div>
+                                <div id="vietlott-forecast-balls" class="vietlott-balls-container" style="justify-content: center; flex-wrap: wrap; gap: 0.75rem; min-height: 4rem;">
+                                    <!-- Dynamic glowing 3D balls -->
+                                </div>
+                            </div>
+
+                            <!-- Backtest results for T-1 -->
+                            <div id="vietlott-backtest-card" style="background: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255,255,255,0.04); border-radius: 10px; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                                <!-- Backtest details -->
+                            </div>
+                        </div>
+
+                        <!-- Model Comparison Table -->
+                        <div class="glass-panel" style="margin-bottom: 1.5rem; padding: 1.5rem;">
+                            <div class="panel-header" style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem;">
+                                <h4 style="margin: 0; font-size: 0.95rem; font-weight: 600; color: #f43f5e; display: flex; align-items: center; gap: 0.5rem;">
+                                    <i class="fa-solid fa-code-compare"></i> So Sánh Độ Tin Cậy & Bộ Số Giữa Các Mô Hình
+                                </h4>
+                                <div style="font-size: 0.72rem; color: var(--text-muted);">
+                                    Xem bộ số đề xuất, độ tin cậy trung bình và tỷ lệ chính xác kỳ trước của từng mô hình AI (Click vào tên mô hình để xem chi tiết)
+                                </div>
+                            </div>
+                            <div class="table-container" style="overflow-x: auto;">
+                                <table style="width: 100%; border-collapse: collapse; min-width: 600px;">
+                                    <thead>
+                                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left;">
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 22%;">Thuật Toán / Mô Hình</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 45%;">Bộ Số Gợi Ý Kỳ Tiếp Theo</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 18%; text-align: center;">Khớp Kỳ Trước (T-1)</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 15%; text-align: center;">Độ Tự Tin (Avg)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="vietlott-model-comparison-tbody">
+                                        <!-- Dynamic content loaded by JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Rolling Backtest History (20 Draws) -->
+                        <div class="glass-panel" style="margin-bottom: 1.5rem; padding: 1.5rem;" id="vietlott-backtest-history-section">
+                            <div class="panel-header" style="margin-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem;">
+                                <h4 style="margin: 0; font-size: 0.95rem; font-weight: 600; color: #f43f5e; display: flex; align-items: center; gap: 0.5rem;">
+                                    <i class="fa-solid fa-history"></i> Kiểm Chứng & Lịch Sử Backtest 20 Kỳ Gần Nhất (<span id="vietlott-backtest-active-model" style="color:#fbbf24; font-weight:700;">-</span>)
+                                </h4>
+                                <div style="font-size: 0.72rem; color: var(--text-muted);">
+                                    Xem chi tiết độ chính xác dự báo (được huấn luyện rolling out-of-sample) qua 20 kỳ quay mở thưởng trước đó của mô hình đang chọn.
+                                </div>
+                            </div>
+                            <div class="table-container" style="overflow-x: auto;">
+                                <table style="width: 100%; border-collapse: collapse; min-width: 600px;">
+                                    <thead>
+                                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left;">
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 12%; text-align: center;">Kỳ Quay</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 15%; text-align: center;">Ngày Mở Thưởng</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 28%; text-align: center;">Kết Quả Thực Tế</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 28%; text-align: center;">Mô Hình Dự Báo</th>
+                                            <th style="padding: 0.6rem 0.8rem; font-size: 0.74rem; font-weight: 600; color: var(--text-muted); width: 17%; text-align: center;">Đánh Giá / Số Trúng</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="vietlott-backtest-history-tbody">
+                                        <!-- Dynamic content loaded by JS -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Probability grid of numbers -->
+                        <div class="glass-panel" style="margin-bottom: 1.5rem; padding: 1.5rem;">
+                            <div class="panel-header" style="margin-bottom: 1.25rem; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 0.5rem;">
+                                <h4 style="margin: 0; font-size: 0.95rem; font-weight: 600; color: #f43f5e; display: flex; align-items: center; gap: 0.5rem;" id="vietlott-probability-title">
+                                    <i class="fa-solid fa-chart-column"></i> Xác Suất Xuất Hiện Chi Tiết Của Từng Con Số
+                                </h4>
+                                <div style="font-size: 0.72rem; color: var(--text-muted);" id="vietlott-probability-subtitle">
+                                    Xác suất dự báo (%) cho kỳ tiếp theo dựa trên các đặc trưng tần số và độ trễ
+                                </div>
+                            </div>
+                            <div id="vietlott-forecast-probabilities" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 0.6rem;">
+                                <!-- Probability list/bars -->
+                            </div>
+                        </div>
+
+                        <!-- Technical Explanation Card -->
+                        <div class="glass-panel" style="padding: 1.5rem; background: linear-gradient(135deg, rgba(244,63,94,0.03) 0%, rgba(255,255,255,0.01) 100%);">
+                            <h4 style="margin: 0 0 0.75rem 0; font-size: 0.9rem; font-weight: 600; color: #f43f5e; display: flex; align-items: center; gap: 0.5rem;">
+                                <i class="fa-solid fa-circle-question"></i> Giải Thích Thuật Toán Dự Báo AI
+                            </h4>
+                            <p style="font-size: 0.76rem; color: var(--text-secondary); line-height: 1.5; margin: 0 0 0.75rem 0;">
+                                Do kết quả xổ số là ngẫu nhiên, mô hình AI không dự đoán chính xác bộ số sẽ ra (điều đó là bất khả thi). Thay vào đó, AI phân tích hành vi lịch sử để tính toán <strong>xác suất xuất hiện (Probability of Appearance)</strong> của từng số dựa trên:
+                            </p>
+                            <ul style="font-size: 0.74rem; color: var(--text-secondary); line-height: 1.6; margin: 0; padding-left: 1.2rem;">
+                                <li><strong>Độ trễ gần nhất (Last Seen):</strong> Số kỳ quay kể từ lần xuất hiện cuối cùng.</li>
+                                <li><strong>Tần suất trượt (Rolling Frequencies):</strong> Tốc độ xuất hiện của số trong 10, 30, 50 và 100 kỳ quay gần nhất.</li>
+                                <li><strong>Phân bố tính chất số:</strong> Thống kê chẵn/lẻ để tối ưu hóa xác suất tổng thể.</li>
+                                <li><strong>Mô hình Ensemble:</strong> Kết hợp trọng số bình quân từ các dự báo của Random Forest, Neural Network (MLP), XGBoost, và Hồi quy để đưa ra kết quả có độ lệch thấp nhất.</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/vietlott.js"></script>
+{% endblock %}
