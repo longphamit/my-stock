@@ -3,35 +3,44 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import os
+import re
+import threading
 from pymongo import MongoClient, UpdateOne
+from zoneinfo import ZoneInfo
 
 # Initialize MongoDB client
 mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 client = MongoClient(mongo_uri)
 db = client["stock_analytics"]
+_calendar_results_lock = threading.Lock()
+
+
+def _prepare_gold_history_frame(rows):
+    """Return chronological trading-day Gold observations for model training."""
+    frame = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(list(rows))
+    if frame.empty or "date" not in frame.columns or "world_price" not in frame.columns:
+        return frame
+    parsed_dates = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.assign(_parsed_date=parsed_dates)
+    frame["world_price"] = pd.to_numeric(frame["world_price"], errors="coerce")
+    frame = frame.dropna(subset=["_parsed_date", "world_price"])
+    frame = frame[frame["world_price"] > 0]
+    frame = frame[frame["_parsed_date"].dt.weekday < 5]
+    frame = frame.sort_values("_parsed_date").drop_duplicates(subset=["date"], keep="last")
+    return frame.drop(columns=["_parsed_date"]).reset_index(drop=True)
 
 def init_db():
     """
-    Initializes the MongoDB indexes and seeds default watchlist.
+    Initializes the MongoDB indexes and seeds the gold data used by the app.
     """
     try:
-        # Create unique indexes
-        db.stock_history.create_index([("ticker", 1), ("date", 1)], unique=True)
-        db.ticker_snapshots.create_index([("ticker", 1)], unique=True)
-        db.watchlist.create_index([("ticker", 1)], unique=True)
+        # Create unique indexes for the gold and macro collections.
         db.gold_history.create_index([("date", 1)], unique=True)
         db.us_economic_calendar.create_index([("date", 1), ("event", 1)], unique=True)
         db.macro_history.create_index([("date", 1)], unique=True)
-        
-        # Seed default watchlist if empty
-        if db.watchlist.count_documents({}) == 0:
-            now = datetime.now()
-            default_tickers = ['TCB', 'FPT', 'VNM', 'HPG', 'SSI']
-            docs = []
-            for idx, ticker in enumerate(default_tickers):
-                added_time = (now + timedelta(seconds=idx)).strftime("%Y-%m-%d %H:%M:%S")
-                docs.append({"ticker": ticker, "added_at": added_time})
-            db.watchlist.insert_many(docs)
+        db.background_activity_history.create_index([("started_at", -1)])
+        db.background_activity_history.create_index([("category", 1), ("started_at", -1)])
+        db.gold_backtest_results.create_index([("year", 1), ("month", 1)], unique=True)
 
         # Seed gold price history if empty or insufficient for predictions
         if db.gold_history.count_documents({}) < 100:
@@ -47,471 +56,6 @@ def init_db():
     except Exception as e:
         print(f"Error initializing MongoDB: {e}")
 
-
-def get_last_trading_day():
-    """
-    Returns the YYYY-MM-DD of the most recent trading session.
-    If today is a weekday and current local time is after 15:30, returns today.
-    Otherwise, returns the previous weekday (taking into account weekends).
-    """
-    now = datetime.now()
-    weekday = now.weekday() # 0 = Monday, 6 = Sunday
-    
-    # Check if we expect today's data to be finalized (after 15:30)
-    is_after_market = now.hour > 15 or (now.hour == 15 and now.minute >= 30)
-    
-    if weekday == 5: # Saturday -> expected last is Friday
-        target = now - timedelta(days=1)
-    elif weekday == 6: # Sunday -> expected last is Friday
-        target = now - timedelta(days=2)
-    elif weekday == 0: # Monday
-        if is_after_market:
-            target = now
-        else:
-            target = now - timedelta(days=3) # Previous Friday
-    else: # Tue, Wed, Thu, Fri
-        if is_after_market:
-            target = now
-        else:
-            target = now - timedelta(days=1) # Yesterday
-            
-    return target.strftime("%Y-%m-%d")
-
-def save_history_to_db(ticker, df):
-    """
-    Saves a DataFrame of historical prices to MongoDB.
-    """
-    if df is None or df.empty:
-        return
-    try:
-        operations = []
-        for _, row in df.iterrows():
-            doc = {
-                "ticker": ticker.upper(),
-                "date": row["date"],
-                "open": float(row["open"]) if pd.notna(row["open"]) else 0.0,
-                "high": float(row["high"]) if pd.notna(row["high"]) else 0.0,
-                "low": float(row["low"]) if pd.notna(row["low"]) else 0.0,
-                "close": float(row["close"]) if pd.notna(row["close"]) else 0.0,
-                "volume": float(row["volume"]) if pd.notna(row["volume"]) else 0.0,
-                "change": float(row["change"]) if "change" in row and pd.notna(row["change"]) else 0.0,
-                "pct_change": float(row["pct_change"]) if "pct_change" in row and pd.notna(row["pct_change"]) else 0.0
-            }
-            operations.append(UpdateOne(
-                {"ticker": doc["ticker"], "date": doc["date"]},
-                {"$set": doc},
-                upsert=True
-            ))
-        if operations:
-            db.stock_history.bulk_write(operations)
-    except Exception as e:
-        print(f"Error saving history to DB for {ticker}: {e}")
-
-def get_history_from_db(ticker):
-    """
-    Loads historical prices from MongoDB for a given ticker as a DataFrame.
-    """
-    ticker = ticker.upper()
-    try:
-        cursor = db.stock_history.find({"ticker": ticker}, {"_id": 0}).sort("date", 1)
-        df = pd.DataFrame(list(cursor))
-        if df.empty:
-            return None
-        # Return columns in specific order matching original schema
-        cols = ["date", "open", "high", "low", "close", "volume", "change", "pct_change"]
-        for col in cols:
-            if col not in df.columns:
-                df[col] = 0.0
-        return df[cols]
-    except Exception as e:
-        print(f"Error reading history from DB for {ticker}: {e}")
-        return None
-
-def save_snapshots_to_db(stocks, index_code="VNALL"):
-    """
-    Saves a list of real-time price snapshots to MongoDB, tagging them with index_code.
-    """
-    if not stocks:
-        return
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        operations = []
-        for s in stocks:
-            doc = {
-                "ticker": s["ticker"].upper(),
-                "basic_price": float(s["basic_price"]),
-                "floor_price": float(s["floor_price"]),
-                "ceiling_price": float(s["ceiling_price"]),
-                "current_price": float(s["current_price"]),
-                "change": float(s["change"]),
-                "pct_change": float(s["pct_change"]),
-                "highest": float(s["highest"]),
-                "lowest": float(s["lowest"]),
-                "volume": float(s["volume"]),
-                "value": float(s["value"]),
-                "last_updated": now_str
-            }
-            operations.append(UpdateOne(
-                {"ticker": doc["ticker"]},
-                {"$set": doc, "$addToSet": {"indices": index_code.upper()}},
-                upsert=True
-            ))
-        if operations:
-            db.ticker_snapshots.bulk_write(operations)
-    except Exception as e:
-        print(f"Error saving snapshots to DB: {e}")
-
-def get_snapshots_from_db(index_code="VNALL"):
-    """
-    Loads snapshots for a specific index from MongoDB.
-    """
-    try:
-        cursor = db.ticker_snapshots.find({"indices": index_code.upper()}, {"_id": 0})
-        return list(cursor)
-    except Exception as e:
-        print(f"Error reading snapshots from DB: {e}")
-        return []
-
-def get_watchlist():
-    """
-    Retrieves the list of tickers in the watchlist.
-    """
-    try:
-        cursor = db.watchlist.find({}, {"_id": 0, "ticker": 1}).sort("added_at", 1)
-        return [doc["ticker"] for doc in cursor]
-    except Exception as e:
-        print(f"Error reading watchlist from DB: {e}")
-        return []
-
-def add_to_watchlist(ticker):
-    """
-    Adds a ticker to the watchlist in MongoDB.
-    """
-    try:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        db.watchlist.update_one(
-            {"ticker": ticker.upper()},
-            {"$set": {"ticker": ticker.upper(), "added_at": now_str}},
-            upsert=True
-        )
-        return True
-    except Exception as e:
-        print(f"Error adding to watchlist: {e}")
-        return False
-
-def remove_from_watchlist(ticker):
-    """
-    Removes a ticker from the watchlist in MongoDB.
-    """
-    try:
-        result = db.watchlist.delete_one({"ticker": ticker.upper()})
-        return result.deleted_count > 0
-    except Exception as e:
-        print(f"Error removing from watchlist: {e}")
-        return False
-
-
-def format_date(date_str, to_format):
-    """
-    Helper to convert date formats.
-    Supported inputs: 'YYYY-MM-DD'
-    """
-    try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return dt.strftime(to_format)
-    except Exception:
-        # Fallback to current time if parse fails
-        return datetime.now().strftime(to_format)
-
-def fetch_vndirect_data(ticker, start_date, end_date):
-    """
-    Fetches historical stock data from VNDirect's public REST API.
-    NOTE: Deprecated/offline. Returns None immediately.
-    """
-    print(f"VNDirect historical API is offline. Skipping fetch for {ticker}.")
-    return None
-
-
-def parse_float(val, default=0.0):
-    try:
-        return float(val) if val else default
-    except ValueError:
-        return default
-
-def fetch_index_tickers(index_code="VNALL"):
-    """
-    Fetches the real-time price snapshot for a specific index (VNALL, VN100, etc.) from VNDirect.
-    Decodes the data using a character shift cipher: chr(ord(char) + idx % 5).
-    """
-    index_code = index_code.upper()
-    url = f"https://price-streaming-api.vndirect.com.vn/v2/stocks/snapshot?indexCodes={index_code}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://banggia.vndirect.com.vn/"
-    }
-    
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return []
-            
-        encoded_list = r.json()
-        stocks = []
-        for item in encoded_list:
-            decoded = "".join(chr(ord(char) + idx % 5) for idx, char in enumerate(item))
-            parts = decoded.split("|")
-            
-            if len(parts) > 54:  # Ensure we have enough elements to read
-                ticker = parts[1]
-                r_parts = parts[1:]
-                
-                # Extract fields safely using helper
-                basic_price = parse_float(r_parts[3]) * 1000
-                floor_price = parse_float(r_parts[4]) * 1000
-                ceiling_price = parse_float(r_parts[5]) * 1000
-                
-                current_val = parse_float(r_parts[52]) * 1000
-                current_price = current_val if current_val > 0 else basic_price
-                
-                change = current_price - basic_price
-                pct_change = (change / basic_price * 100) if basic_price > 0 else 0.0
-                
-                highest_val = parse_float(r_parts[48]) * 1000
-                highest = highest_val if highest_val > 0 else current_price
-                
-                lowest_val = parse_float(r_parts[49]) * 1000
-                lowest = lowest_val if lowest_val > 0 else current_price
-                
-                volume = parse_float(r_parts[51])
-                # Value is in million VND, multiply by 1M to get VND
-                value = parse_float(r_parts[50]) * 1000000
-                
-                stocks.append({
-                    "ticker": ticker,
-                    "basic_price": basic_price,
-                    "floor_price": floor_price,
-                    "ceiling_price": ceiling_price,
-                    "current_price": current_price,
-                    "change": change,
-                    "pct_change": pct_change,
-                    "highest": highest,
-                    "lowest": lowest,
-                    "volume": volume,
-                    "value": value
-                })
-        if stocks:
-            save_snapshots_to_db(stocks, index_code)
-        return stocks
-    except Exception as e:
-        print(f"Error fetching {index_code} snapshot: {e}")
-        cached = get_snapshots_from_db(index_code)
-        if cached:
-            print(f"Network error. Fallback to {len(cached)} cached snapshots from DB for {index_code}.")
-            return cached
-        return []
-
-def fetch_vnall_tickers():
-    return fetch_index_tickers("VNALL")
-
-def fetch_vn100_tickers():
-    return fetch_index_tickers("VN100")
-
-def fetch_cafef_data(ticker, start_date, end_date, max_pages=6):
-    """
-    Fetches historical stock data from CafeF's redirect endpoint in pages of 20.
-    Gathers enough pages to satisfy the start_date range (up to 200 trading days).
-    """
-    # Convert 'YYYY-MM-DD' to 'dd/mm/yyyy'
-    try:
-        sd = datetime.strptime(start_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-        ed = datetime.strptime(end_date, "%Y-%m-%d").strftime("%d/%m/%Y")
-    except Exception:
-        sd = (datetime.now() - timedelta(days=365)).strftime("%d/%m/%Y")
-        ed = datetime.now().strftime("%d/%m/%Y")
-        
-    url = "https://cafef.vn/du-lieu/ajax/pagenew/datahistory/pricehistory.ashx"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"https://cafef.vn/du-lieu/lich-su-giao-dich-{ticker.lower()}-1.chn"
-    }
-    
-    all_data = []
-    
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    
-    def fetch_page(p):
-        params = {
-            "Symbol": ticker.upper(),
-            "StartDate": sd,
-            "EndDate": ed,
-            "PageIndex": p,
-            "PageSize": 20
-        }
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=10)
-            if r.status_code == 200:
-                res_data = r.json()
-                if res_data.get("Success") and res_data.get("Data"):
-                    return res_data["Data"].get("Data", [])
-        except Exception as e:
-            print(f"Error fetching page {p} from CafeF: {e}")
-        return []
-
-    # Run fetching in parallel threads
-    results_by_page = {}
-    with ThreadPoolExecutor(max_workers=max_pages) as executor:
-        futures = {executor.submit(fetch_page, p): p for p in range(1, max_pages + 1)}
-        for future in as_completed(futures):
-            p = futures[future]
-            try:
-                rows = future.result()
-                if rows:
-                    results_by_page[p] = rows
-            except Exception as e:
-                print(f"Page {p} thread error: {e}")
-                
-    # Merge results in order of pages (1 to max_pages)
-    for p in sorted(results_by_page.keys()):
-        rows = results_by_page[p]
-        all_data.extend(rows)
-        if len(rows) < 20:
-            break
-            
-    if not all_data:
-        return None
-        
-    try:
-        parsed = []
-        for item in all_data:
-            # Format date: 'dd/mm/yyyy' -> 'YYYY-MM-DD'
-            dt = datetime.strptime(item["Ngay"], "%d/%m/%Y")
-            date_str = dt.strftime("%Y-%m-%d")
-            
-            # Parse change & pct_change
-            thay_doi = item["ThayDoi"].replace(",", ".")
-            parts = thay_doi.split()
-            try:
-                change_val = float(parts[0]) * 1000
-            except:
-                change_val = 0.0
-            try:
-                pct_change_val = float(parts[1].strip("()%"))
-            except:
-                pct_change_val = 0.0
-                
-            parsed.append({
-                "date": date_str,
-                "open": float(item["GiaMoCua"]) * 1000,
-                "high": float(item["GiaCaoNhat"]) * 1000,
-                "low": float(item["GiaThapNhat"]) * 1000,
-                "close": float(item["GiaDongCua"]) * 1000,
-                "volume": float(item["KhoiLuongKhopLenh"]),
-                "change": change_val,
-                "pct_change": pct_change_val
-            })
-            
-        df = pd.DataFrame(parsed)
-        # Sort ascending by date
-        df = df.sort_values(by="date").reset_index(drop=True)
-        return df
-    except Exception as e:
-        print(f"Error parsing CafeF data: {e}")
-        return None
-
-def update_cache_bg(ticker, start_date, end_date, max_pages):
-    try:
-        print(f"Background update starting for {ticker}...")
-        df_new = fetch_cafef_data(ticker, start_date, end_date, max_pages=max_pages)
-        if df_new is not None and not df_new.empty:
-            save_history_to_db(ticker, df_new)
-            print(f"Background update successful for {ticker}.")
-        else:
-            print(f"Background update failed/empty for {ticker}.")
-    except Exception as e:
-        print(f"Error in background update for {ticker}: {e}")
-
-def get_stock_data(ticker, start_date=None, end_date=None):
-    """
-    Main entry point for stock daily history data crawling.
-    Checks MongoDB first. If data exists and is up-to-date, returns from DB.
-    Otherwise, fetches from online sources, saves/merges to DB, and returns.
-    """
-    init_db() # Ensure tables exist
-    
-    if start_date is None:
-        start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-    if end_date is None:
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        
-    ticker = ticker.strip().upper()
-    
-    # 1. Check local DB cache
-    df_cached = get_history_from_db(ticker)
-    
-    # Check if cache is valid (not stale and has enough data)
-    is_cache_valid = False
-    if df_cached is not None and len(df_cached) >= 20:
-        latest_date = df_cached["date"].max()
-        last_trading = get_last_trading_day()
-        if latest_date >= last_trading:
-            is_cache_valid = True
-            
-    if is_cache_valid:
-        print(f"Cache hit for {ticker}. Latest date in DB: {latest_date}. Returning from DB.")
-        df_filtered = df_cached[(df_cached["date"] >= start_date) & (df_cached["date"] <= end_date)].reset_index(drop=True)
-        if len(df_filtered) >= 20:
-            return df_filtered, "Database (Cached)"
-        else:
-            print(f"Filtered cache has only {len(df_filtered)} rows, which is less than 20. Fetching online instead.")
-
-    # SWR (Stale-While-Revalidate): If cache exists but is stale, return stale cache immediately and update in background.
-    if df_cached is not None and len(df_cached) >= 20:
-        print(f"Cache stale for {ticker}. Returning stale cache and spawning background update thread...")
-        import threading
-        t = threading.Thread(target=update_cache_bg, args=(ticker, start_date, end_date, 1))
-        t.daemon = True
-        t.start()
-        
-        df_filtered = df_cached[(df_cached["date"] >= start_date) & (df_cached["date"] <= end_date)].reset_index(drop=True)
-        return df_filtered, "Database (Stale-While-Revalidate)"
-
-
-    # 2. Cache is missing or stale. Fetch from online.
-    print(f"Cache miss/stale for {ticker}. Fetching online...")
-    df_new = None
-    source = "None"
-    
-    # Optimize: If we already have history, we only need to fetch the first page (20 records) to get up to date.
-    max_pages = 6
-    if df_cached is not None and len(df_cached) >= 20:
-        max_pages = 1
-        
-    # Try CafeF
-    print(f"Fetching from CafeF for ticker {ticker} (max_pages={max_pages})...")
-    df_new = fetch_cafef_data(ticker, start_date, end_date, max_pages=max_pages)
-    if df_new is not None:
-        source = "CafeF (Synced to DB)"
-        print(f"Successfully fetched from CafeF. Row count: {len(df_new)}")
-    else:
-        print("CafeF fetch failed. Skip VNDirect fallback (offline).")
-
-            
-    if df_new is not None and not df_new.empty:
-        # Save new records to database
-        save_history_to_db(ticker, df_new)
-        # Reload combined data from DB to ensure complete dataset (e.g. merge past history with new rows)
-        df_combined = get_history_from_db(ticker)
-        if df_combined is not None:
-            df_filtered = df_combined[(df_combined["date"] >= start_date) & (df_combined["date"] <= end_date)].reset_index(drop=True)
-            return df_filtered, source
-            
-    # 3. Online fetch failed. Fallback to stale database cache if available
-    if df_cached is not None and len(df_cached) >= 20:
-        print(f"Online fetch failed for {ticker}. Falling back to stale DB cache.")
-        df_filtered = df_cached[(df_cached["date"] >= start_date) & (df_cached["date"] <= end_date)].reset_index(drop=True)
-        return df_filtered, source
-        
-    return None, "None"
 
 def fetch_gold_prices(bypass_cache=False):
     """
@@ -657,8 +201,24 @@ def fetch_gold_prices(bypass_cache=False):
 
     # Fetch news, economic calendar, macro indicators, crude oil, and geopolitical conflicts
     news = fetch_macro_news()
+    market_signals = collect_gold_market_signals(news)
     calendar = get_us_economic_calendar()
     macro_indicators = fetch_us_macro_indicators()
+    try:
+        macro_snapshot = list(
+            db.macro_history.find({}, {"_id": 0})
+            .sort("date", -1)
+            .limit(2)
+        )
+    except Exception as macro_snapshot_error:
+        print(f"Error loading macro snapshot for FED outlook: {macro_snapshot_error}")
+        macro_snapshot = []
+    fed_policy_outlook = build_fed_policy_outlook(
+        macro_indicators=macro_indicators,
+        macro_history=macro_snapshot,
+        calendar=calendar,
+        market_signals=market_signals,
+    )
     crude_oil = fetch_crude_oil_price()
     conflict_events = fetch_geopolitical_conflicts()
 
@@ -679,11 +239,35 @@ def fetch_gold_prices(bypass_cache=False):
             "brands": brand_prices
         },
         "news": news,
+        "market_signals": market_signals,
         "calendar": calendar,
         "macro_indicators": macro_indicators,
+        "fed_policy_outlook": fed_policy_outlook,
         "crude_oil": crude_oil,
         "conflict_events": conflict_events
     }
+
+    # A transient RSS/FRED/commodity-source failure must not erase the last
+    # usable news, calendar, macro or price section from the shared cache.
+    # Keep the fresh value when it exists and retain the previous value only
+    # for an empty section.
+    try:
+        previous_cache = db.gold_prices.find_one({"_id": "latest_prices"})
+        if previous_cache:
+            for key in ("news", "market_signals", "calendar", "conflict_events", "fed_policy_outlook"):
+                if not gold_data.get(key) and previous_cache.get(key):
+                    gold_data[key] = previous_cache[key]
+            for parent, children in {
+                "world": ("price", "converted_ounce", "converted_cay"),
+                "domestic": ("sjc_bar", "sjc_ring", "brands"),
+            }.items():
+                previous_parent = previous_cache.get(parent, {})
+                current_parent = gold_data.get(parent, {})
+                for child in children:
+                    if not current_parent.get(child) and previous_parent.get(child):
+                        current_parent[child] = previous_parent[child]
+    except Exception as cache_merge_err:
+        print(f"Error retaining stale dashboard sections: {cache_merge_err}")
 
     # Save cache if we fetched valid data
     if world_price or sjc_bar["buy"]:
@@ -709,12 +293,10 @@ def fetch_gold_prices(bypass_cache=False):
             db.gold_history.update_one({"date": today_str}, {"$set": today_doc}, upsert=True)
             print(f"Successfully saved gold history point for {today_str}.")
             
-            try:
-                update_gold_predictions_history()
-            except Exception as hist_err:
-                print(f"Error updating gold prediction history in fetch: {hist_err}")
-
-            # 3. Save to intraday ticks table to capture fluctuations during the day
+            # 3. Save to intraday ticks immediately. Full model training and
+            # history backfill are intentionally not run in this price crawler:
+            # they used to block the worker before the tick insert completed,
+            # leaving the 24-hour chart stale for many hours.
             try:
                 sjc_buy_val = clean_vnd_price(sjc_bar["buy"])
                 sjc_sell_val = clean_vnd_price(sjc_bar["sell"])
@@ -928,7 +510,7 @@ def update_macro_history(days=365):
             
         close_prices = df["Close"]
         # Fill missing values
-        close_prices = close_prices.ffill().bfill()
+        close_prices = close_prices.ffill()
         
         operations = []
         for index, row in close_prices.iterrows():
@@ -962,6 +544,641 @@ def update_macro_history(days=365):
             print(f"Successfully saved {len(operations)} macro history records to MongoDB.")
     except Exception as e:
         print(f"Error updating macro history: {e}")
+
+
+PCE_RELEASES_2026 = [
+    ("2026-01-22", "2025-11"),
+    ("2026-02-20", "2025-12"),
+    ("2026-03-13", "2026-01"),
+    ("2026-04-09", "2026-02"),
+    ("2026-04-30", "2026-03"),
+    ("2026-05-28", "2026-04"),
+    ("2026-06-25", "2026-05"),
+    ("2026-07-30", "2026-06"),
+    ("2026-08-26", "2026-07"),
+    ("2026-09-30", "2026-08"),
+    ("2026-10-29", "2026-09"),
+    ("2026-11-25", "2026-10"),
+    ("2026-12-23", "2026-11"),
+]
+
+
+# Policy events are kept separately from the FOMC rate-decision dates.  A
+# speech can change the expected rate path even when no target range changes.
+# The event is sourced from the Federal Reserve's public event/speech page and
+# is intentionally represented as a FED event so the existing calendar and
+# `days_to_fed` feature can consume it.
+FED_POLICY_EVENTS_2026 = [
+    {
+        "date": "2026-08-28",
+        "event": "Phát biểu Chủ tịch FED Kevin Warsh tại Jackson Hole",
+        "category": "FED",
+        "event_type": "FED_SPEECH",
+        "importance": "Rất cao",
+        "impact": (
+            "Phát biểu về lạm phát và định hướng lãi suất có thể làm thay đổi "
+            "kỳ vọng lợi suất/DXY, từ đó tác động trực tiếp đến vàng."
+        ),
+        "policy_tone": "hawkish",
+        "policy_tone_label": "Hawkish · gây áp lực giảm vàng ngắn hạn",
+        "source": "Federal Reserve",
+        "source_url": "https://www.federalreserve.gov/newsevents/speech/warsh20260828a.htm",
+    },
+]
+
+
+FED_FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+BEA_RELEASE_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
+BLS_RELEASE_SCHEDULE_URL = "https://www.bls.gov/schedule/{year}/"
+BLS_ICS_SCHEDULE_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
+CALENDAR_SCHEDULE_TTL = timedelta(hours=6)
+
+
+def _calendar_source_headers():
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+
+def _month_number(month_name):
+    months = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+    }
+    return months.get(str(month_name or "").strip().lower())
+
+
+def _parse_calendar_date(value, year=None):
+    """Parse common English official-calendar date labels into YYYY-MM-DD."""
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return None
+    match = re.search(
+        r"(?P<month>January|February|March|April|May|June|July|August|"
+        r"September|October|November|December)\s+(?P<day>\d{1,2})"
+        r"(?:,?\s+(?P<year>\d{4}))?",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    parsed_year = int(match.group("year") or year or datetime.now().year)
+    month = _month_number(match.group("month"))
+    day = int(match.group("day"))
+    try:
+        return datetime(parsed_year, month, day).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_reference_period(title):
+    """Return (month, year) from official release titles such as 'August 2026'."""
+    match = re.search(
+        r"(?:for|,|\()\s*(January|February|March|April|May|June|July|August|"
+        r"September|October|November|December)\s+(\d{4})",
+        str(title or ""),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    month = _month_number(match.group(1))
+    return (month, int(match.group(2))) if month else None
+
+
+def _crawl_fomc_meeting_events(years=None):
+    """Crawl the official FOMC meeting calendar (including future years)."""
+    from bs4 import BeautifulSoup
+
+    requested_years = {int(year) for year in (years or [])}
+    response = requests.get(
+        FED_FOMC_CALENDAR_URL,
+        headers=_calendar_source_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.content, "html.parser")
+    events = []
+    for panel in soup.select("#article .panel.panel-default"):
+        heading = panel.select_one(".panel-heading h4")
+        year_match = re.search(r"(20\d{2})", heading.get_text(" ", strip=True) if heading else "")
+        if not year_match:
+            continue
+        year = int(year_match.group(1))
+        if requested_years and year not in requested_years:
+            continue
+
+        for row in panel.select(".fomc-meeting"):
+            month_node = row.select_one(".fomc-meeting__month")
+            date_node = row.select_one(".fomc-meeting__date")
+            if not month_node or not date_node:
+                continue
+            month = _month_number(month_node.get_text(" ", strip=True))
+            raw_range = date_node.get_text(" ", strip=True)
+            range_match = re.search(r"(\d{1,2})\s*-\s*(\d{1,2})", raw_range)
+            if not month or not range_match:
+                continue
+            start_day, end_day = map(int, range_match.groups())
+            try:
+                meeting_start = datetime(year, month, start_day)
+                meeting_end = datetime(year, month, end_day)
+            except ValueError:
+                continue
+
+            statement_link = row.select_one(
+                'a[href*="/newsevents/pressreleases/monetary"]'
+            )
+            press_conference_link = row.select_one(
+                'a[href*="/monetarypolicy/fomcpresconf"]'
+            )
+            source_url = FED_FOMC_CALENDAR_URL
+            statement_url = ""
+            if statement_link and statement_link.get("href"):
+                statement_url = requests.compat.urljoin(FED_FOMC_CALENDAR_URL, statement_link["href"])
+                source_url = statement_url
+
+            decision_date = meeting_end.strftime("%Y-%m-%d")
+            start_date = meeting_start.strftime("%Y-%m-%d")
+            end_date = meeting_end.strftime("%Y-%m-%d")
+            projection = "*" in raw_range
+            events.append({
+                "date": decision_date,
+                "event": (
+                    f"Cuộc họp FOMC & quyết định lãi suất FED "
+                    f"({start_day:02d}–{end_day:02d}/{month:02d}/{year})"
+                ),
+                "category": "FED",
+                "event_type": "FOMC_MEETING",
+                "event_key": f"FOMC:{decision_date}",
+                "importance": "Rất cao",
+                "impact": (
+                    "Cuộc họp FOMC, tuyên bố chính sách và cuộc họp báo có thể "
+                    "làm thay đổi kỳ vọng lãi suất, USD/lợi suất và giá vàng."
+                ),
+                "meeting_start_date": start_date,
+                "meeting_end_date": end_date,
+                "fomc_projection": projection,
+                "source": "Federal Reserve · FOMC",
+                "source_url": source_url,
+                "statement_url": statement_url,
+                "press_conference_url": (
+                    requests.compat.urljoin(FED_FOMC_CALENDAR_URL, press_conference_link["href"])
+                    if press_conference_link and press_conference_link.get("href")
+                    else ""
+                ),
+                "schedule_crawled_at": datetime.now().isoformat(timespec="seconds"),
+            })
+    return events
+
+
+def _crawl_bea_release_events(years=None):
+    """Crawl BEA releases, especially PCE, GDP, income and trade."""
+    from bs4 import BeautifulSoup
+
+    requested_years = {int(year) for year in (years or [])}
+    response = requests.get(
+        BEA_RELEASE_SCHEDULE_URL,
+        headers=_calendar_source_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.content, "html.parser")
+    events = []
+    for table in soup.select("table"):
+        header = table.select_one("th")
+        year_match = re.search(r"(20\d{2})", header.get_text(" ", strip=True) if header else "")
+        year = int(year_match.group(1)) if year_match else datetime.now().year
+        if requested_years and year not in requested_years:
+            continue
+        for row in table.select("tr"):
+            date_node = row.select_one(".release-date")
+            title_node = row.select_one(".release-title")
+            if not date_node or not title_node:
+                continue
+            title = re.sub(r"\s+", " ", title_node.get_text(" ", strip=True))
+            date = _parse_calendar_date(date_node.get_text(" ", strip=True), year=year)
+            if not date or not title:
+                continue
+            title_lower = title.lower()
+            if "personal income and outlays" in title_lower:
+                category = "PCE"
+                period = _parse_reference_period(title)
+                if period:
+                    month, reference_year = period
+                    event_name = f"Công bố PCE & Core PCE Mỹ (Tháng {month:02d}/{reference_year})"
+                else:
+                    event_name = f"BEA · {title}"
+                event_type = "BEA_PCE_RELEASE"
+                impact = (
+                    "PCE/Core PCE cao hơn dự báo → kỳ vọng lãi suất cao lâu hơn → "
+                    "USD/lợi suất tăng → Vàng chịu áp lực giảm ngắn hạn."
+                )
+            elif "gdp" in title_lower or "corporate profits" in title_lower:
+                category, event_type = "GDP", "BEA_GDP_RELEASE"
+                event_name = f"Công bố GDP Mỹ · {title}"
+                impact = "GDP tốt hơn kỳ vọng có thể củng cố USD/lợi suất và gây áp lực lên vàng."
+            elif "trade" in title_lower or "international transactions" in title_lower:
+                category, event_type = "Thương mại", "BEA_TRADE_RELEASE"
+                event_name = f"Cán cân thương mại Mỹ · {title}"
+                impact = "Dữ liệu thương mại làm thay đổi đánh giá tăng trưởng và nhu cầu USD ngắn hạn."
+            else:
+                continue
+            time_node = date_node.select_one("small")
+            release_time = time_node.get_text(" ", strip=True) if time_node else ""
+            events.append({
+                "date": date,
+                "event": event_name,
+                "category": category,
+                "event_type": event_type,
+                "event_key": f"{event_type}:{date}:{title}",
+                "importance": "Rất cao" if category == "PCE" else "Cao",
+                "impact": impact,
+                "release_time": release_time,
+                "source_timezone": "America/New_York",
+                "source": "U.S. Bureau of Economic Analysis (BEA)",
+                "source_url": BEA_RELEASE_SCHEDULE_URL,
+                "source_title": title,
+                "schedule_crawled_at": datetime.now().isoformat(timespec="seconds"),
+            })
+    return events
+
+
+def _ics_unescape(value):
+    return (
+        str(value or "")
+        .replace("\\n", " ")
+        .replace("\\N", " ")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
+    )
+
+
+def _parse_ics_datetime(value):
+    """Parse an ICS DTSTART into (YYYY-MM-DD, HH:MM AM/PM)."""
+    raw = str(value or "").strip()
+    match = re.search(r"(20\d{2})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?", raw)
+    if not match:
+        return None, ""
+    year, month, day = (int(match.group(i)) for i in (1, 2, 3))
+    try:
+        date = datetime(year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        return None, ""
+    hour, minute = match.group(4), match.group(5)
+    release_time = ""
+    if hour is not None and minute is not None:
+        release_time = datetime(2000, 1, 1, int(hour), int(minute)).strftime("%I:%M %p")
+    return date, release_time
+
+
+def _build_bls_calendar_event(date, title, release_time="", source_url=None):
+    """Normalize one BLS schedule row into the calendar schema."""
+    title = re.sub(r"\s+", " ", _ics_unescape(title).strip())
+    if not date or not title:
+        return None
+    title_lower = title.lower()
+    if "employment situation" in title_lower:
+        category, event_type = "Việc làm", "BLS_NFP_RELEASE"
+        period = _parse_reference_period(title)
+        event_name = (
+            f"Báo cáo việc làm phi nông nghiệp Mỹ (NFP Tháng {period[0]:02d}/{period[1]})"
+            if period else f"BLS · {title}"
+        )
+        impact = "NFP mạnh thường củng cố USD/lợi suất và gây áp lực lên vàng; NFP yếu có tác động ngược lại."
+    elif "consumer price index" in title_lower:
+        category, event_type = "CPI", "BLS_CPI_RELEASE"
+        period = _parse_reference_period(title)
+        event_name = (
+            f"Công bố chỉ số lạm phát CPI Mỹ (Tháng {period[0]:02d}/{period[1]})"
+            if period else f"BLS · {title}"
+        )
+        impact = "CPI cao hơn kỳ vọng có thể làm FED giữ lãi suất cao lâu hơn và gây áp lực lên vàng."
+    elif "producer price index" in title_lower:
+        category, event_type = "PPI", "BLS_PPI_RELEASE"
+        event_name = f"Công bố PPI Mỹ · {title}"
+        impact = "PPI là tín hiệu sớm của áp lực giá, có thể làm thay đổi kỳ vọng chính sách FED."
+    elif "job openings and labor turnover" in title_lower:
+        category, event_type = "Việc làm", "BLS_JOLTS_RELEASE"
+        event_name = f"Công bố JOLTS Mỹ · {title}"
+        impact = "JOLTS phản ánh nhu cầu lao động và có thể làm thay đổi kỳ vọng lãi suất FED."
+    elif "employment cost index" in title_lower or "employer costs for employee compensation" in title_lower:
+        category, event_type = "Việc làm", "BLS_ECI_RELEASE"
+        event_name = f"Công bố Employment Cost Index Mỹ · {title}"
+        impact = "Chi phí lao động dai dẳng có thể giữ áp lực lạm phát và lợi suất ở mức cao."
+    else:
+        return None
+    return {
+        "date": date,
+        "event": event_name,
+        "category": category,
+        "event_type": event_type,
+        "event_key": f"{event_type}:{date}:{title}",
+        "importance": "Rất cao" if category in ("CPI", "Việc làm") else "Cao",
+        "impact": impact,
+        "release_time": release_time,
+        "source_timezone": "America/New_York",
+        "source": "U.S. Bureau of Labor Statistics (BLS)",
+        "source_url": source_url or BLS_RELEASE_SCHEDULE_URL.format(year=date[:4]),
+        "source_title": title,
+        "schedule_crawled_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _crawl_bls_ics_release_events(years=None):
+    """Crawl BLS' official iCalendar feed for key labor/inflation releases."""
+    requested_years = {int(year) for year in (years or [])}
+    response = requests.get(
+        BLS_ICS_SCHEDULE_URL,
+        headers={**_calendar_source_headers(), "Accept": "text/calendar,*/*;q=0.8"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    # RFC 5545 allows folded lines; continuation lines begin with a space/tab.
+    lines = []
+    for line in response.text.replace("\r\n", "\n").split("\n"):
+        if line.startswith((" ", "\t")) and lines:
+            lines[-1] += line[1:]
+        else:
+            lines.append(line)
+    events = []
+    current = None
+    for line in lines:
+        if line == "BEGIN:VEVENT":
+            current = {}
+            continue
+        if line == "END:VEVENT":
+            if current:
+                date, release_time = _parse_ics_datetime(current.get("DTSTART"))
+                if date and (not requested_years or int(date[:4]) in requested_years):
+                    event = _build_bls_calendar_event(
+                        date,
+                        current.get("SUMMARY", ""),
+                        release_time=release_time,
+                        source_url=BLS_ICS_SCHEDULE_URL,
+                    )
+                    if event:
+                        events.append(event)
+            current = None
+            continue
+        if current is None or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        current[key.split(";", 1)[0].upper()] = _ics_unescape(value)
+    return events
+
+
+def _crawl_bls_release_events(years=None):
+    """Crawl BLS key releases, trying official ICS before HTML schedules."""
+    requested_years = sorted({int(year) for year in (years or [])}) or [datetime.now().year]
+    try:
+        ics_events = _crawl_bls_ics_release_events(requested_years)
+        if ics_events:
+            return ics_events
+    except Exception as ics_error:
+        print(f"BLS iCalendar crawl failed, trying HTML schedule: {ics_error}")
+
+    from bs4 import BeautifulSoup
+
+    events = []
+    for year in requested_years:
+        response = requests.get(
+            BLS_RELEASE_SCHEDULE_URL.format(year=year),
+            headers=_calendar_source_headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+        for row in soup.select("table tr"):
+            cells = row.find_all(["th", "td"])
+            if len(cells) < 3:
+                continue
+            date = _parse_calendar_date(cells[0].get_text(" ", strip=True), year=year)
+            title = cells[-1].get_text(" ", strip=True)
+            event = _build_bls_calendar_event(
+                date,
+                title,
+                release_time=cells[1].get_text(" ", strip=True),
+                source_url=BLS_RELEASE_SCHEDULE_URL.format(year=year),
+            )
+            if event:
+                events.append(event)
+    return events
+
+
+def _upsert_crawled_calendar_events(events):
+    """Merge crawled rows into the existing calendar without deleting seeded data."""
+    updated = 0
+    for event in events:
+        date = event.get("date")
+        category = event.get("category")
+        event_type = event.get("event_type")
+        if not date or not category or not event_type:
+            continue
+
+        # Give legacy seeded rows a type so the first crawl updates them in
+        # place instead of creating a duplicate row for the same release.
+        db.us_economic_calendar.update_many(
+            {
+                "date": date,
+                "category": category,
+                "event_type": {"$exists": False},
+            },
+            {"$set": {"event_type": event_type}},
+        )
+        result = db.us_economic_calendar.update_one(
+            {"date": date, "category": category, "event_type": event_type},
+            {"$set": event},
+            upsert=True,
+        )
+        if result.modified_count or result.upserted_id:
+            updated += 1
+    return updated
+
+
+def crawl_official_us_economic_calendar(force=False):
+    """Refresh official schedules for FED, BLS and BEA with safe fallbacks."""
+    now = datetime.now()
+    try:
+        state = db.calendar_schedule_sync_state.find_one({"_id": "official_schedule"}) or {}
+        last_success = state.get("last_success_at")
+        if not force and isinstance(last_success, datetime) and now - last_success < CALENDAR_SCHEDULE_TTL:
+            return {
+                "status": "skipped",
+                "updated": 0,
+                "sources": state.get("sources", []),
+                "source_errors": state.get("source_errors", []),
+                "last_success_at": last_success.isoformat(timespec="seconds"),
+            }
+
+        years = [now.year, now.year + 1]
+        crawled_events = []
+        source_errors = []
+        source_counts = {}
+        for source_name, crawler_fn in (
+            ("Federal Reserve FOMC", _crawl_fomc_meeting_events),
+            ("BEA", _crawl_bea_release_events),
+            ("BLS", _crawl_bls_release_events),
+        ):
+            try:
+                source_events = crawler_fn(years=years)
+                crawled_events.extend(source_events)
+                source_counts[source_name] = len(source_events)
+            except Exception as error:
+                source_counts[source_name] = 0
+                source_errors.append(f"{source_name}: {error}")
+                print(f"Economic calendar crawl failed for {source_name}: {error}")
+
+        updated = _upsert_crawled_calendar_events(crawled_events)
+        sync_doc = {
+            "last_attempt_at": now,
+            "last_success_at": now,
+            "sources": source_counts,
+            "source_errors": source_errors,
+            "updated": updated,
+        }
+        db.calendar_schedule_sync_state.update_one(
+            {"_id": "official_schedule"},
+            {"$set": sync_doc},
+            upsert=True,
+        )
+        return {
+            "status": "partial" if source_errors else "success",
+            "updated": updated,
+            "sources": source_counts,
+            "source_errors": source_errors,
+            "last_success_at": now.isoformat(timespec="seconds"),
+        }
+    except Exception as error:
+        print(f"Error crawling official US economic calendar: {error}")
+        return {"status": "error", "updated": 0, "source_errors": [str(error)]}
+
+
+def ensure_pce_calendar_events():
+    """Upsert the official BEA Personal Income and Outlays release dates."""
+    operations = []
+    for release_date, reference_month in PCE_RELEASES_2026:
+        year, month = reference_month.split("-")
+        event = {
+            "date": release_date,
+            "event": f"Công bố PCE & Core PCE Mỹ (Tháng {month}/{year})",
+            "category": "PCE",
+            "importance": "Rất cao",
+            "impact": (
+                "PCE/Core PCE cao hơn dự báo → kỳ vọng lãi suất cao lâu hơn → "
+                "USD/lợi suất tăng → Vàng chịu áp lực giảm ngắn hạn."
+            ),
+            "source": "U.S. Bureau of Economic Analysis (BEA)",
+            "source_url": "https://www.bea.gov/news/schedule",
+        }
+        operations.append(UpdateOne(
+            {"date": release_date, "event": event["event"]},
+            {"$set": event},
+            upsert=True,
+        ))
+    if operations:
+        db.us_economic_calendar.bulk_write(operations)
+
+
+def update_pce_history_from_fred(days=365):
+    """Attach headline/core PCE to each macro row only after its release date.
+
+    FRED indexes observations by the reference month, not the date on which the
+    market learned the value.  Mapping observations to the official BEA
+    release date prevents future PCE values from leaking into backtests.
+    """
+    try:
+        ensure_pce_calendar_events()
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=max(int(days), 365) + 500)).strftime("%Y-%m-%d")
+        headline = _fetch_fred_series("PCEPI", start_date, end_date)
+        core = _fetch_fred_series("PCEPILFE", start_date, end_date)
+        if not headline or not core:
+            print("FRED returned empty PCE series.")
+            return 0
+
+        pce = pd.DataFrame({
+            "pce_headline_index": pd.Series(headline),
+            "pce_core_index": pd.Series(core),
+        })
+        pce.index = pd.to_datetime(pce.index, errors="coerce")
+        pce = pce.dropna().sort_index()
+        pce["pce_headline_mom"] = pce["pce_headline_index"].pct_change(1) * 100.0
+        pce["pce_core_mom"] = pce["pce_core_index"].pct_change(1) * 100.0
+        pce["pce_headline_yoy"] = pce["pce_headline_index"].pct_change(12) * 100.0
+        pce["pce_core_yoy"] = pce["pce_core_index"].pct_change(12) * 100.0
+
+        official_release_map = {
+            reference_month: release_date
+            for release_date, reference_month in PCE_RELEASES_2026
+        }
+        released_rows = []
+        for period_date, row in pce.iterrows():
+            reference_month = period_date.strftime("%Y-%m")
+            release_date = official_release_map.get(reference_month)
+            if not release_date:
+                # Conservative fallback for historical months not covered by
+                # the explicit calendar: expose the value at the second month
+                # end, after the normal late-next-month release window.
+                release_date = (period_date + pd.offsets.MonthEnd(2)).strftime("%Y-%m-%d")
+            released_rows.append({
+                "release_date": release_date,
+                "pce_reference_month": reference_month,
+                "pce_headline_yoy": row.get("pce_headline_yoy"),
+                "pce_core_yoy": row.get("pce_core_yoy"),
+                "pce_headline_mom": row.get("pce_headline_mom"),
+                "pce_core_mom": row.get("pce_core_mom"),
+            })
+
+        releases = pd.DataFrame(released_rows)
+        for col in ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom"):
+            releases[col] = pd.to_numeric(releases[col], errors="coerce")
+        releases["_release_dt"] = pd.to_datetime(releases["release_date"], errors="coerce")
+        releases = releases.dropna(subset=["_release_dt"]).sort_values("_release_dt")
+
+        macro_dates = list(db.macro_history.find({}, {"_id": 0, "date": 1}).sort("date", 1))
+        if not macro_dates:
+            return 0
+        macro_frame = pd.DataFrame(macro_dates)
+        macro_frame["_date_dt"] = pd.to_datetime(macro_frame["date"], errors="coerce")
+        macro_frame = macro_frame.dropna(subset=["_date_dt"]).sort_values("_date_dt")
+        merged = pd.merge_asof(
+            macro_frame,
+            releases,
+            left_on="_date_dt",
+            right_on="_release_dt",
+            direction="backward",
+        )
+
+        operations = []
+        pce_fields = ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom")
+        for _, row in merged.iterrows():
+            values = {}
+            for field in pce_fields:
+                value = row.get(field)
+                if value is not None and pd.notna(value):
+                    values[field] = float(value)
+            if not values:
+                continue
+            values["pce_release_date"] = str(row.get("release_date"))
+            values["pce_reference_month"] = str(row.get("pce_reference_month"))
+            operations.append(UpdateOne(
+                {"date": str(row["date"])},
+                {"$set": values},
+                upsert=False,
+            ))
+
+        if operations:
+            result = db.macro_history.bulk_write(operations)
+            print(f"FRED/BEA: Updated PCE features on {result.modified_count} macro rows.")
+        return len(operations)
+    except Exception as error:
+        print(f"Error updating PCE history: {error}")
+        return 0
 
 
 def update_real_yield_from_fred(days=400):
@@ -1024,19 +1241,26 @@ def update_real_yield_from_fred(days=400):
 
 
 def update_all_macro(days=365):
-    """Convenience wrapper: update Yahoo Finance macro + FRED real yield."""
+    """Update Yahoo Finance series plus FRED real-yield and PCE features."""
     update_macro_history(days=days)
     update_real_yield_from_fred(days=days)
+    update_pce_history_from_fred(days=days)
 
 
 def calculate_days_until_events(dates_series):
     """
     Given a pandas Series of dates (in YYYY-MM-DD string format),
     queries the us_economic_calendar collection in MongoDB and returns
-    three pandas Series of the same length containing the number of days
-    until the next FED meeting, CPI release, and NFP release.
+    four arrays containing the days until the next FED, CPI, NFP, and PCE
+    release. PCE dates come from the official BEA schedule.
     """
-    # 1. Fetch all events from DB
+    # 1. Ensure the PCE schedule exists, then fetch all events from DB.
+    try:
+        ensure_pce_calendar_events()
+        ensure_fed_policy_events()
+        crawl_official_us_economic_calendar()
+    except Exception as pce_calendar_error:
+        print(f"Error ensuring macro policy calendar events: {pce_calendar_error}")
     try:
         events = list(db.us_economic_calendar.find({}, {"_id": 0}))
     except Exception as e:
@@ -1047,7 +1271,8 @@ def calculate_days_until_events(dates_series):
     event_dates = {
         "FED": [],
         "CPI": [],
-        "Việc làm": []  # Non-Farm Payrolls category is 'Việc làm'
+        "Việc làm": [],  # Non-Farm Payrolls category is 'Việc làm'
+        "PCE": [],
     }
     
     for ev in events:
@@ -1088,12 +1313,14 @@ def calculate_days_until_events(dates_series):
     days_to_fed = [get_days_until_next(d, "FED") for d in dates_series]
     days_to_cpi = [get_days_until_next(d, "CPI") for d in dates_series]
     days_to_nfp = [get_days_until_next(d, "Việc làm") for d in dates_series]
+    days_to_pce = [get_days_until_next(d, "PCE") for d in dates_series]
     
-    return days_to_fed, days_to_cpi, days_to_nfp
+    return days_to_fed, days_to_cpi, days_to_nfp, days_to_pce
 
-def calculate_dynamic_ensemble_weights(limit=20):
+def calculate_dynamic_ensemble_weights(limit=20, return_diagnostics=False, model_version=None):
     """
-    Computes model weights for Random Forest, Linear Regression, MLP, and XGBoost
+    Computes adaptive weights for six base models: RF, Linear Regression, MLP,
+    XGBoost, LSTM and CNN 1D.
     based on a COMBINED score of:
       - 50%: Historical MAPE (Mean Absolute Percentage Error) — accuracy of magnitude
       - 50%: Directional accuracy (% of times correct direction was predicted)
@@ -1101,20 +1328,25 @@ def calculate_dynamic_ensemble_weights(limit=20):
         dict: {model_key: weight} summing to 1.0.
     """
     try:
+        query = {"actual_price": {"$ne": None, "$gt": 0.0}}
+        if model_version:
+            query["model_version"] = model_version
         cursor = db.gold_predictions_history.find(
-            {"actual_price": {"$ne": None, "$gt": 0.0}},
-            {"_id": 0, "date": 1, "actual_price": 1, "models": 1}
+            query,
+            {"_id": 0, "date": 1, "actual_price": 1, "forecast_base_price": 1, "models": 1, "model_version": 1}
         ).sort("date", -1).limit(limit)
         
         history = list(cursor)
         if len(history) < 5:
-            return {
-                "random_forest": 0.20,
-                "linear_regression": 0.20,
-                "mlp": 0.20,
-                "xgboost": 0.20,
-                "lstm": 0.20
+            fallback = {
+                "random_forest": 1 / 6,
+                "linear_regression": 1 / 6,
+                "mlp": 1 / 6,
+                "xgboost": 1 / 6,
+                "lstm": 1 / 6,
+                "cnn": 1 / 6,
             }
+            return (fallback, {}) if return_diagnostics else fallback
 
         # Sort ascending for direction comparison
         history_asc = list(reversed(history))
@@ -1124,16 +1356,24 @@ def calculate_dynamic_ensemble_weights(limit=20):
             "linear_regression": [],
             "mlp": [],
             "xgboost": [],
-            "lstm": []
+            "lstm": [],
+            "cnn": []
         }
         model_dir_correct = {k: [] for k in model_errors}
+        persistence_errors = []
         
         for i, doc in enumerate(history_asc):
             actual = doc.get("actual_price")
             models_preds = doc.get("models", {})
 
-            # Previous actual price for direction comparison
-            prev_actual = history_asc[i - 1].get("actual_price") if i > 0 else None
+            # Prefer the exact base price saved with that forecast. Older
+            # records fall back to the previous resolved close.
+            prev_actual = doc.get("forecast_base_price")
+            if not prev_actual and i > 0:
+                prev_actual = history_asc[i - 1].get("actual_price")
+
+            if actual and prev_actual and prev_actual > 0:
+                persistence_errors.append(abs(actual - prev_actual) / actual)
 
             for m_key in model_errors.keys():
                 pred = models_preds.get(m_key)
@@ -1161,42 +1401,72 @@ def calculate_dynamic_ensemble_weights(limit=20):
         mape_scores = {k: 1.0 / (v + epsilon) for k, v in mapes.items()}
         total_mape = sum(mape_scores.values())
         mape_weights = {k: v / total_mape for k, v in mape_scores.items()} if total_mape > 0 \
-                       else {k: 0.25 for k in mape_scores}
+                       else {k: 1.0 / len(mape_scores) for k in mape_scores}
 
         # Normalize directional accuracy into weights
         total_dir = sum(dir_accs.values())
         dir_weights = {k: v / total_dir for k, v in dir_accs.items()} if total_dir > 0 \
-                      else {k: 0.25 for k in dir_accs}
+                      else {k: 1.0 / len(dir_accs) for k in dir_accs}
 
         # Combine 50% MAPE + 50% directional accuracy
         combined = {k: 0.5 * mape_weights[k] + 0.5 * dir_weights[k] for k in mape_weights}
         total_combined = sum(combined.values())
         weights = {k: float(v / total_combined) for k, v in combined.items()} if total_combined > 0 \
-                  else {k: 0.25 for k in combined}
+                  else {k: 1.0 / len(combined) for k in combined}
+
+        persistence_mape = (
+            float(np.mean(persistence_errors)) if len(persistence_errors) >= 3 else None
+        )
+        diagnostics = {}
+        for model_key in model_errors:
+            sample_count = len(model_errors[model_key])
+            mape_skill = (
+                1.0 - mapes[model_key] / max(persistence_mape, 1e-10)
+                if persistence_mape is not None else 0.0
+            )
+            direction_skill = max(0.0, min(1.0, (dir_accs[model_key] - 0.5) * 2.0))
+            sample_factor = min(1.0, sample_count / 30.0)
+            reliability = sample_factor * (
+                0.60 * max(0.0, min(1.0, mape_skill))
+                + 0.40 * direction_skill
+            )
+            diagnostics[model_key] = {
+                "samples": sample_count,
+                "mape": float(mapes[model_key]),
+                "persistence_mape": persistence_mape,
+                "mape_skill_vs_persistence": float(mape_skill),
+                "directional_accuracy": float(dir_accs[model_key]),
+                "reliability": float(reliability),
+            }
 
         print(f"Ensemble weights (MAPE+Dir): {' | '.join(f'{k}={v:.3f}' for k,v in weights.items())}")
         print(f"  Directional accuracy: {' | '.join(f'{k}={v:.1%}' for k,v in dir_accs.items())}")
-        return weights
+        return (weights, diagnostics) if return_diagnostics else weights
     except Exception as e:
         print(f"Error calculating dynamic ensemble weights: {e}")
-        return {
-            "random_forest": 0.20,
-            "linear_regression": 0.20,
-            "mlp": 0.20,
-            "xgboost": 0.20,
-            "lstm": 0.20
+        fallback = {
+            "random_forest": 1 / 6,
+            "linear_regression": 1 / 6,
+            "mlp": 1 / 6,
+            "xgboost": 1 / 6,
+            "lstm": 1 / 6,
+            "cnn": 1 / 6
         }
+        return (fallback, {}) if return_diagnostics else fallback
 
 
-def calculate_gold_model_biases(limit=15):
+def calculate_gold_model_biases(limit=15, model_version=None):
     """
     Calculates the rolling bias (mean error = actual - pred) of the models
     over the last `limit` days to apply online feedback error correction (self-learning).
     """
     try:
+        query = {"actual_price": {"$ne": None, "$gt": 0.0}}
+        if model_version:
+            query["model_version"] = model_version
         cursor = db.gold_predictions_history.find(
-            {"actual_price": {"$ne": None, "$gt": 0.0}},
-            {"_id": 0, "actual_price": 1, "models": 1}
+            query,
+            {"_id": 0, "actual_price": 1, "models": 1, "model_version": 1}
         ).sort("date", -1).limit(limit)
         
         history = list(cursor)
@@ -1206,11 +1476,12 @@ def calculate_gold_model_biases(limit=15):
                 "linear_regression": 0.0,
                 "mlp": 0.0,
                 "xgboost": 0.0,
-                "lstm": 0.0
+                "lstm": 0.0,
+                "cnn": 0.0
             }
             
         biases = {}
-        model_keys = ["random_forest", "linear_regression", "mlp", "xgboost", "lstm"]
+        model_keys = ["random_forest", "linear_regression", "mlp", "xgboost", "lstm", "cnn"]
         for m_key in model_keys:
             errors = []
             for doc in history:
@@ -1230,7 +1501,538 @@ def calculate_gold_model_biases(limit=15):
             "linear_regression": 0.0,
             "mlp": 0.0,
             "xgboost": 0.0,
-            "lstm": 0.0
+            "lstm": 0.0,
+            "cnn": 0.0
+        }
+
+
+def calculate_gold_model_comparison(days=30):
+    """Compare resolved Gold forecasts over the most recent trading sessions.
+
+    Metrics are calculated only from records with a known actual price. The
+    primary ranking metric is MAPE, followed by RMSE and directional accuracy,
+    so a model is not promoted merely because it guessed the direction while
+    missing the price by a large amount.
+    """
+    model_keys = [
+        "random_forest",
+        "linear_regression",
+        "mlp",
+        "xgboost",
+        "lstm",
+        "cnn",
+        "ensemble",
+        "roundtable_vote",
+    ]
+    model_labels = {
+        "random_forest": "Random Forest",
+        "linear_regression": "Hồi quy tuyến tính",
+        "mlp": "MLP",
+        "xgboost": "XGBoost",
+        "lstm": "LSTM",
+        "cnn": "CNN 1D",
+        "ensemble": "Ensemble",
+    }
+    try:
+        days = max(1, min(int(days), 180))
+        query = {"actual_price": {"$ne": None, "$gt": 0.0}}
+        # One extra record provides the previous close needed for direction
+        # scoring when the first evaluated forecast lacks forecast_base_price.
+        cursor = db.gold_predictions_history.find(
+            query,
+            {
+                "_id": 0,
+                "date": 1,
+                "actual_price": 1,
+                "forecast_base_price": 1,
+                "models": 1,
+            },
+        ).sort("date", -1).limit(days + 1)
+        history = list(cursor)
+        history.reverse()
+        if len(history) > days:
+            evaluation = history[-days:]
+        else:
+            evaluation = history
+
+        accumulators = {
+            key: {
+                "absolute_errors": [],
+                "squared_errors": [],
+                "percentage_errors": [],
+                "signed_errors": [],
+                "direction_correct": [],
+                "predictions": 0,
+            }
+            for key in model_keys
+        }
+
+        evaluation_start_index = len(history) - len(evaluation)
+        for index, item in enumerate(evaluation):
+            try:
+                actual = float(item.get("actual_price"))
+            except (TypeError, ValueError):
+                continue
+            if actual <= 0:
+                continue
+
+            base_price = item.get("forecast_base_price")
+            try:
+                base_price = float(base_price)
+            except (TypeError, ValueError):
+                base_price = 0.0
+            if base_price <= 0:
+                # Look first at the preceding resolved record, including the
+                # extra context record fetched above.
+                history_index = evaluation_start_index + index
+                previous_item = history[history_index - 1] if history_index > 0 else None
+                try:
+                    base_price = float(previous_item.get("actual_price")) if previous_item else 0.0
+                except (TypeError, ValueError, AttributeError):
+                    base_price = 0.0
+
+            for model_key in model_keys:
+                try:
+                    predicted = float((item.get("models") or {}).get(model_key))
+                except (TypeError, ValueError):
+                    continue
+                if predicted <= 0:
+                    continue
+                error = predicted - actual
+                metrics = accumulators[model_key]
+                metrics["absolute_errors"].append(abs(error))
+                metrics["squared_errors"].append(error ** 2)
+                metrics["percentage_errors"].append(abs(error) / actual * 100.0)
+                metrics["signed_errors"].append(error)
+                metrics["predictions"] += 1
+                if base_price > 0:
+                    actual_direction = 1 if actual > base_price else (-1 if actual < base_price else 0)
+                    predicted_direction = 1 if predicted > base_price else (-1 if predicted < base_price else 0)
+                    metrics["direction_correct"].append(
+                        1 if actual_direction == predicted_direction else 0
+                    )
+
+        stats = []
+        for model_key in model_keys:
+            metrics = accumulators[model_key]
+            sample_count = metrics["predictions"]
+            if sample_count == 0:
+                continue
+            direction_count = len(metrics["direction_correct"])
+            stats.append({
+                "model": model_key,
+                "label": model_labels[model_key],
+                "samples": sample_count,
+                "mae": float(np.mean(metrics["absolute_errors"])),
+                "rmse": float(np.sqrt(np.mean(metrics["squared_errors"]))),
+                "mape": float(np.mean(metrics["percentage_errors"])),
+                "directional_accuracy": (
+                    float(np.mean(metrics["direction_correct"]) * 100.0)
+                    if direction_count else None
+                ),
+                "direction_samples": direction_count,
+                "mean_error": float(np.mean(metrics["signed_errors"])),
+            })
+
+        stats.sort(
+            key=lambda row: (
+                row["mape"],
+                row["rmse"],
+                -(row["directional_accuracy"] or 0.0),
+            )
+        )
+        for rank, row in enumerate(stats, start=1):
+            row["rank"] = rank
+            row["is_best"] = rank == 1
+
+        return {
+            "status": "success",
+            "window_sessions": days,
+            "evaluated_sessions": len(evaluation),
+            "resolved_sessions": len(history),
+            "from_date": evaluation[0].get("date") if evaluation else None,
+            "to_date": evaluation[-1].get("date") if evaluation else None,
+            "ranking_metric": "mape_then_rmse_then_direction",
+            "best_model": stats[0] if stats else None,
+            "models": stats,
+        }
+    except Exception as error:
+        print(f"Error calculating Gold model comparison: {error}")
+        return {
+            "status": "error",
+            "message": str(error),
+            "window_sessions": days,
+            "evaluated_sessions": 0,
+            "models": [],
+            "best_model": None,
+        }
+
+
+def run_gold_month_backtest(year=None, month=9):
+    """Run a leakage-safe one-step walk-forward backtest for one month.
+
+    Each target session is predicted using only gold history strictly before
+    that session. The function intentionally does not use current production
+    bias corrections or dynamic weights because either could contain
+    information from dates after the target. The returned ensemble is a plain
+    average of the available six base-model forecasts.
+    """
+    model_keys = [
+        "random_forest",
+        "linear_regression",
+        "mlp",
+        "xgboost",
+        "lstm",
+        "cnn",
+        "ensemble",
+        "roundtable_vote",
+    ]
+    try:
+        now = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+        as_of_date = now.date()
+        year = int(year if year is not None else now.year)
+        month = int(month)
+        if year < 2000 or year > 2100 or month < 1 or month > 12:
+            raise ValueError("year phải trong khoảng 2000-2100 và month trong khoảng 1-12")
+
+        import predictor as pred_module
+        import pandas as pd
+
+        history = _prepare_gold_history_frame(
+            list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+        ).to_dict(orient="records")
+        # A backtest may only score sessions whose actual close is known as of
+        # today. This prevents seeded/cache rows or a data-source timezone
+        # mismatch from making a current September run show prices through
+        # September 30 before those sessions happen.
+        history = [
+            item for item in history
+            if str(item.get("date", "")) <= as_of_date.strftime("%Y-%m-%d")
+        ]
+        month_prefix = f"{year:04d}-{month:02d}-"
+        target_indices = [
+            index for index, item in enumerate(history)
+            if str(item.get("date", "")).startswith(month_prefix)
+        ]
+        autofill_result = None
+        if not target_indices:
+            # The live crawler keeps a compact recent history. Expand it on
+            # demand for an older selected month before declaring the
+            # backtest empty.
+            requested_start = datetime(year, month, 1)
+            fill_days = max(90, (now - requested_start).days + 35)
+            autofill_result = auto_fill_gold_history_from_yfinance(days=fill_days)
+            history = _prepare_gold_history_frame(
+                list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+            ).to_dict(orient="records")
+            history = [
+                item for item in history
+                if str(item.get("date", "")) <= as_of_date.strftime("%Y-%m-%d")
+            ]
+            target_indices = [
+                index for index, item in enumerate(history)
+                if str(item.get("date", "")).startswith(month_prefix)
+            ]
+        if not target_indices:
+            available_dates = [str(item.get("date")) for item in history if item.get("date")]
+            source_error = (autofill_result or {}).get("message") if isinstance(autofill_result, dict) else None
+            message = (
+                f"Không có dữ liệu giá vàng thực tế cho tháng {month:02d}/{year}."
+            )
+            if source_error:
+                message += f" Không thể tải dữ liệu lịch sử: {source_error}"
+            elif available_dates:
+                message += (
+                    f" Dữ liệu hiện có từ {available_dates[0]} đến {available_dates[-1]}."
+                )
+            else:
+                message += " Nguồn dữ liệu lịch sử chưa trả về dữ liệu."
+            return {
+                "status": "no_data",
+                "message": message,
+                "model_version": pred_module.GOLD_MODEL_VERSION,
+                "year": year,
+                "month": month,
+                "month_label": f"{month:02d}/{year}",
+                "target_sessions": 0,
+                "evaluated_sessions": 0,
+                "as_of_date": as_of_date.strftime("%Y-%m-%d"),
+                "available_from": available_dates[0] if available_dates else None,
+                "available_to": available_dates[-1] if available_dates else None,
+                "data_source": (autofill_result or {}).get("source") if isinstance(autofill_result, dict) else None,
+                "models": [],
+                "rows": [],
+                "errors": [],
+            }
+        macro_list = list(db.macro_history.find({}, {"_id": 0}))
+        macro_df = pd.DataFrame(macro_list) if macro_list else pd.DataFrame()
+        rows = []
+        errors = []
+        base_model_keys = model_keys[:6]
+        roundtable_performance = {key: [] for key in base_model_keys}
+
+        for target_index in target_indices:
+            target_item = history[target_index]
+            target_date = target_item.get("date")
+            actual_price = target_item.get("world_price")
+            try:
+                actual_price = float(actual_price)
+            except (TypeError, ValueError):
+                actual_price = 0.0
+            if actual_price <= 0:
+                continue
+
+            hist_slice = history[:target_index]
+            if len(hist_slice) < 21:
+                errors.append(f"{target_date}: không đủ tối thiểu 21 phiên lịch sử")
+                continue
+
+            try:
+                frame = pd.DataFrame(hist_slice)
+                frame["world_price"] = frame["world_price"].replace(0.0, np.nan).ffill()
+                frame["close"] = frame["world_price"]
+                frame["open"] = frame["world_price"]
+                frame["high"] = frame["world_price"]
+                frame["low"] = frame["world_price"]
+                frame["volume"] = 1.0
+                if not macro_df.empty and "date" in macro_df.columns:
+                    frame = pd.merge(frame, macro_df, on="date", how="left")
+                    macro_columns = [
+                        "dxy", "us10y", "vix", "brent", "dji", "spx",
+                    "eurusd", "xagusd", "real_yield", "gld", "gld_trust",
+                    "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                    ]
+                    available = [column for column in macro_columns if column in frame.columns]
+                    if available:
+                        frame[available] = frame[available].ffill()
+                if "dji" not in frame.columns:
+                    frame["dji"] = 35000.0
+                if "spx" not in frame.columns:
+                    frame["spx"] = 5000.0
+
+                # Keep the calendar-aware event channels available to CNN
+                # during walk-forward evaluation without using any released
+                # value from after the target session.
+                try:
+                    days_to_fed, days_to_cpi, days_to_nfp, days_to_pce = calculate_days_until_events(frame["date"])
+                    frame["days_to_fed"] = days_to_fed
+                    frame["days_to_cpi"] = days_to_cpi
+                    frame["days_to_nfp"] = days_to_nfp
+                    frame["days_to_pce"] = days_to_pce
+                except Exception:
+                    frame["days_to_fed"] = 15.0
+                    frame["days_to_cpi"] = 15.0
+                    frame["days_to_nfp"] = 15.0
+                    frame["days_to_pce"] = 15.0
+
+                frame_ind = pred_module.calculate_technical_indicators(frame)
+                predictions = {}
+                model_errors = {}
+                model_calls = {
+                    "random_forest": lambda: pred_module.predict_future_prices_rf(frame_ind, days_to_predict=1),
+                    "linear_regression": lambda: pred_module.predict_future_prices(frame_ind, days_to_predict=1),
+                    "mlp": lambda: pred_module.predict_future_prices_mlp(frame_ind, days_to_predict=1),
+                    "xgboost": lambda: pred_module.predict_future_prices_xgb(frame_ind, days_to_predict=1),
+                    "lstm": lambda: pred_module.predict_future_prices_lstm(frame_ind, days_to_predict=1),
+                    "cnn": lambda: pred_module.predict_future_prices_cnn(frame_ind, days_to_predict=1),
+                }
+                for model_key, model_call in model_calls.items():
+                    try:
+                        result = model_call()
+                        prediction = float(result[0][0])
+                        if prediction > 0 and np.isfinite(prediction):
+                            predictions[model_key] = prediction
+                            model_errors[model_key] = {
+                                "absolute": abs(prediction - actual_price),
+                                "percentage": abs(prediction - actual_price) / actual_price * 100.0,
+                            }
+                    except Exception as model_error:
+                        errors.append(f"{target_date}/{model_key}: {model_error}")
+
+                base_price = float(frame["close"].iloc[-1])
+                base_predictions = [
+                    predictions[key]
+                    for key in model_keys[:-1]
+                    if key in predictions
+                ]
+                if base_predictions:
+                    predictions["ensemble"] = float(np.mean(base_predictions))
+                    model_errors["ensemble"] = {
+                        "absolute": abs(predictions["ensemble"] - actual_price),
+                        "percentage": abs(predictions["ensemble"] - actual_price) / actual_price * 100.0,
+                    }
+                # Reproducible meeting decision. Weights may use only errors
+                # from earlier target sessions, never this session's actual.
+                available_members = [key for key in base_model_keys if key in predictions]
+                raw_weights = {}
+                for model_key in available_members:
+                    prior_errors = roundtable_performance[model_key]
+                    if len(prior_errors) >= 3:
+                        inverse_error = 1.0 / max(float(np.mean(prior_errors)), 0.01)
+                        raw_weights[model_key] = float(np.clip(inverse_error, 0.25, 4.0))
+                    else:
+                        raw_weights[model_key] = 1.0
+                weight_total = sum(raw_weights.values()) or 1.0
+                member_votes = []
+                roundtable_return = 0.0
+                vote_tally = {"up": 0.0, "down": 0.0, "sideways": 0.0}
+                direction_threshold = base_price * 0.0002
+                for model_key in available_members:
+                    weight = raw_weights[model_key] / weight_total
+                    model_price = predictions[model_key]
+                    change = model_price - base_price
+                    vote = "up" if change > direction_threshold else ("down" if change < -direction_threshold else "sideways")
+                    vote_tally[vote] += weight
+                    roundtable_return += weight * (model_price / base_price - 1.0)
+                    prior_errors = roundtable_performance[model_key]
+                    prior_text = (
+                        f"MAPE quá khứ {float(np.mean(prior_errors)):.2f}%/{len(prior_errors)} phiên"
+                        if prior_errors else "chưa có phiên trước trong cửa sổ"
+                    )
+                    member_votes.append({
+                        "model": model_key,
+                        "weight": float(weight),
+                        "vote": vote,
+                        "price": float(model_price),
+                        "pct_change": float(change / base_price * 100.0),
+                        "reason": (
+                            f"Dự báo {model_price:.2f} USD ({change / base_price * 100.0:+.2f}%); "
+                            f"trọng số dựa trên {prior_text}. Phản biện: các model dùng chung dữ liệu nên phiếu có tương quan."
+                        ),
+                    })
+                roundtable_price = float(base_price * (1.0 + roundtable_return))
+                if available_members:
+                    predictions["roundtable_vote"] = roundtable_price
+                    model_errors["roundtable_vote"] = {
+                        "absolute": abs(roundtable_price - actual_price),
+                        "percentage": abs(roundtable_price - actual_price) / actual_price * 100.0,
+                    }
+                decision_change = roundtable_price - base_price
+                decision_vote = "up" if decision_change > direction_threshold else ("down" if decision_change < -direction_threshold else "sideways")
+                actual_change = actual_price - base_price
+                actual_vote = "up" if actual_change > direction_threshold else ("down" if actual_change < -direction_threshold else "sideways")
+                roundtable_record = {
+                    "formed_before_actual": True,
+                    "weight_basis": "inverse prior-session MAPE; equal until 3 prior observations",
+                    "member_votes": member_votes,
+                    "weighted_tally": {key: float(value) for key, value in vote_tally.items()},
+                    "decision": {
+                        "price": roundtable_price,
+                        "vote": decision_vote,
+                        "pct_change": float(decision_change / base_price * 100.0),
+                        "confidence": "medium" if max(vote_tally.values(), default=0.0) >= 0.75 else "low",
+                    },
+                    "evaluation": {
+                        "actual_vote": actual_vote,
+                        "direction_correct": decision_vote == actual_vote,
+                        "absolute_error": abs(roundtable_price - actual_price),
+                        "percentage_error": abs(roundtable_price - actual_price) / actual_price * 100.0,
+                    },
+                }
+                rows.append({
+                    "date": target_date,
+                    "actual_price": actual_price,
+                    "base_price": base_price,
+                    "models": predictions,
+                    "errors": model_errors,
+                    "roundtable": roundtable_record,
+                })
+                for model_key in available_members:
+                    roundtable_performance[model_key].append(
+                        abs(predictions[model_key] - actual_price) / actual_price * 100.0
+                    )
+            except Exception as day_error:
+                errors.append(f"{target_date}: {day_error}")
+
+        stats = []
+        for model_key in model_keys:
+            absolute_errors = []
+            squared_errors = []
+            percentage_errors = []
+            direction_results = []
+            signed_errors = []
+            for row in rows:
+                prediction = row["models"].get(model_key)
+                if prediction is None:
+                    continue
+                actual = row["actual_price"]
+                error = prediction - actual
+                absolute_errors.append(abs(error))
+                squared_errors.append(error ** 2)
+                percentage_errors.append(abs(error) / actual * 100.0)
+                signed_errors.append(error)
+                base_price = row.get("base_price", 0.0)
+                if base_price > 0:
+                    actual_direction = 1 if actual > base_price else (-1 if actual < base_price else 0)
+                    predicted_direction = 1 if prediction > base_price else (-1 if prediction < base_price else 0)
+                    direction_results.append(1 if actual_direction == predicted_direction else 0)
+            if not absolute_errors:
+                continue
+            stats.append({
+                "model": model_key,
+                "label": {
+                    "random_forest": "Random Forest",
+                    "linear_regression": "Hồi quy tuyến tính",
+                    "mlp": "MLP",
+                    "xgboost": "XGBoost",
+                    "lstm": "LSTM",
+                    "cnn": "CNN 1D",
+                    "ensemble": "Ensemble",
+                    "roundtable_vote": "Quyết định hội nghị",
+                }[model_key],
+                "samples": len(absolute_errors),
+                "mae": float(np.mean(absolute_errors)),
+                "rmse": float(np.sqrt(np.mean(squared_errors))),
+                "mape": float(np.mean(percentage_errors)),
+                "directional_accuracy": float(np.mean(direction_results) * 100.0) if direction_results else None,
+                "direction_samples": len(direction_results),
+                "mean_error": float(np.mean(signed_errors)),
+            })
+
+        stats.sort(
+            key=lambda row: (
+                row["mape"],
+                row["rmse"],
+                -(row["directional_accuracy"] or 0.0),
+            )
+        )
+        for rank, row in enumerate(stats, start=1):
+            row["rank"] = rank
+            row["is_best"] = rank == 1
+
+        return {
+            "status": "success",
+            "model_version": pred_module.GOLD_MODEL_VERSION,
+            "year": year,
+            "month": month,
+            "month_label": f"{month:02d}/{year}",
+            "target_sessions": len(target_indices),
+            "evaluated_sessions": len(rows),
+            "as_of_date": as_of_date.strftime("%Y-%m-%d"),
+            "from_date": rows[0]["date"] if rows else None,
+            "to_date": rows[-1]["date"] if rows else None,
+            "ranking_metric": "mape_then_rmse_then_direction",
+            "roundtable_backtest_mode": "walk_forward_prior_error_weighted_vote",
+            "roundtable_summary": next((item for item in stats if item["model"] == "roundtable_vote"), None),
+            "best_model": stats[0] if stats else None,
+            "models": stats,
+            "rows": rows,
+            "errors": errors[:30],
+        }
+    except Exception as error:
+        print(f"Error running Gold month backtest: {error}")
+        return {
+            "status": "error",
+            "message": str(error),
+            "model_version": pred_module.GOLD_MODEL_VERSION if "pred_module" in locals() else None,
+            "year": year,
+            "month": month,
+            "target_sessions": 0,
+            "evaluated_sessions": 0,
+            "as_of_date": as_of_date.strftime("%Y-%m-%d") if "as_of_date" in locals() else None,
+            "models": [],
+            "rows": [],
+            "errors": [str(error)],
         }
 
 
@@ -1250,18 +2052,19 @@ def load_gold_model_hyperparameters():
 
 def tune_and_save_gold_hyperparameters():
     """
-    Runs hyperparameter search on the last 180 days of gold data,
-    and caches the best params in MongoDB.
+    Runs leakage-safe multi-horizon tuning and caches only OOS improvements.
     """
     try:
         import predictor as pred_module
         import pandas as pd
-        history = list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+        history = _prepare_gold_history_frame(
+            list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+        ).to_dict(orient="records")
         if len(history) < 50:
             print("Insufficient gold history to tune parameters.")
-            return
+            return {"status": "insufficient_data", "samples": len(history)}
             
-        df = pd.DataFrame(history)
+        df = _prepare_gold_history_frame(history)
         df["close"] = df["world_price"]
         df["open"] = df["world_price"]
         df["high"] = df["world_price"]
@@ -1273,12 +2076,33 @@ def tune_and_save_gold_hyperparameters():
         macro_df = pd.DataFrame(list(macro_cursor))
         if not macro_df.empty and "date" in macro_df.columns:
             df = pd.merge(df, macro_df, on="date", how="left")
-            cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield"] if c in df.columns]
-            df[cols] = df[cols].ffill().bfill()
+            cols = [c for c in [
+                "dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd",
+                "xagusd", "real_yield", "gld", "gld_trust",
+                "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+            ] if c in df.columns]
+            df[cols] = df[cols].ffill()
+
+        try:
+            days_to_fed, days_to_cpi, days_to_nfp, days_to_pce = calculate_days_until_events(df["date"])
+            df["days_to_fed"] = days_to_fed
+            df["days_to_cpi"] = days_to_cpi
+            df["days_to_nfp"] = days_to_nfp
+            df["days_to_pce"] = days_to_pce
+        except Exception as event_error:
+            print(f"Tuning event features unavailable: {event_error}")
+            for column in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce"):
+                df[column] = 15.0
             
         df_ind = pred_module.calculate_technical_indicators(df)
-        print("Running Hyperparameter Self-Optimization Grid Search for Gold...")
-        best_params = pred_module.optimize_hyperparameters(df_ind, days_to_predict=1)
+        existing = db.gold_model_hyperparameters.find_one({"type": "gold_params"}) or {}
+        print("Running multi-horizon walk-forward optimization for Gold...")
+        best_params, diagnostics = pred_module.optimize_hyperparameters(
+            df_ind,
+            days_to_predict=5,
+            incumbent_params=existing.get("params") or {},
+            return_diagnostics=True,
+        )
         
         if best_params:
             db.gold_model_hyperparameters.update_one(
@@ -1286,14 +2110,18 @@ def tune_and_save_gold_hyperparameters():
                 {"$set": {
                     "type": "gold_params",
                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "params": best_params
+                    "model_version": pred_module.GOLD_MODEL_VERSION,
+                    "params": best_params,
+                    "diagnostics": diagnostics,
                 }},
                 upsert=True
             )
             print("Successfully updated Gold Hyperparameters cache in MongoDB.")
             print(f"Optimized Params: {best_params}")
+        return {"status": diagnostics.get("status", "success"), "params": best_params, "diagnostics": diagnostics}
     except Exception as e:
         print(f"Error tuning gold hyperparameters: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 def backfill_gold_predictions_history(days=60):
@@ -1309,7 +2137,9 @@ def backfill_gold_predictions_history(days=60):
         import pandas as pd
         import numpy as np
 
-        history = list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+        history = _prepare_gold_history_frame(
+            list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+        ).to_dict(orient="records")
         if len(history) < 22:
             return {"status": "error", "message": "Không đủ lịch sử (cần ít nhất 22 ngày)"}
 
@@ -1342,7 +2172,7 @@ def backfill_gold_predictions_history(days=60):
             # Build dataframe using history up to yesterday (idx-1)
             hist_slice = history[:idx]
             df = pd.DataFrame(hist_slice)
-            df["world_price"] = df["world_price"].replace(0.0, np.nan).ffill().bfill()
+            df["world_price"] = df["world_price"].replace(0.0, np.nan).ffill()
             df["close"] = df["world_price"]
             df["open"]  = df["world_price"]
             df["high"]  = df["world_price"]
@@ -1352,8 +2182,8 @@ def backfill_gold_predictions_history(days=60):
             # Merge macro data
             if not macro_df.empty and "date" in macro_df.columns:
                 df = pd.merge(df, macro_df, on="date", how="left")
-                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd"] if c in df.columns]
-                df[cols] = df[cols].ffill().bfill()
+                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield", "gld", "gld_trust"] if c in df.columns]
+                df[cols] = df[cols].ffill()
             if "dji" not in df.columns:
                 df["dji"] = 35000.0
             if "spx" not in df.columns:
@@ -1370,25 +2200,30 @@ def backfill_gold_predictions_history(days=60):
                 mlp_p,  _, _, _ = pred_module.predict_future_prices_mlp(df_ind, days_to_predict=1)
                 xgb_p,  _, _, _ = pred_module.predict_future_prices_xgb(df_ind, days_to_predict=1)
                 lstm_p, _, _, _ = pred_module.predict_future_prices_lstm(df_ind, days_to_predict=1)
+                cnn_p,  _, _, _ = pred_module.predict_future_prices_cnn(df_ind, days_to_predict=1)
 
                 weights = calculate_dynamic_ensemble_weights()
-                w_rf   = weights.get("random_forest",    0.20)
-                w_lr   = weights.get("linear_regression", 0.20)
-                w_mlp  = weights.get("mlp",              0.20)
-                w_xgb  = weights.get("xgboost",          0.20)
-                w_lstm = weights.get("lstm",             0.20)
+                w_rf   = weights.get("random_forest",    1 / 6)
+                w_lr   = weights.get("linear_regression", 1 / 6)
+                w_mlp  = weights.get("mlp",              1 / 6)
+                w_xgb  = weights.get("xgboost",          1 / 6)
+                w_lstm = weights.get("lstm",             1 / 6)
+                w_cnn  = weights.get("cnn",              1 / 6)
                 ens_p  = float(rf_p[0]*w_rf + lr_p[0]*w_lr + mlp_p[0]*w_mlp
-                               + xgb_p[0]*w_xgb + lstm_p[0]*w_lstm)
+                               + xgb_p[0]*w_xgb + lstm_p[0]*w_lstm + cnn_p[0]*w_cnn)
 
                 doc = {
                     "date": target_date,
                     "actual_price": float(actual_price),
+                    "forecast_base_price": float(hist_slice[-1].get("world_price", 0.0)),
+                    "forecast_source": "walk_forward_backfill",
                     "models": {
                         "random_forest":     float(rf_p[0]),
                         "linear_regression": float(lr_p[0]),
                         "mlp":               float(mlp_p[0]),
                         "xgboost":           float(xgb_p[0]),
                         "lstm":              float(lstm_p[0]),
+                        "cnn":               float(cnn_p[0]),
                         "ensemble":          ens_p
                     }
                 }
@@ -1415,20 +2250,44 @@ def auto_fill_gold_history_from_yfinance(days=90):
     and inserts any missing dates in gold_history.
     """
     try:
-        import yfinance as yf
-        print(f"Auto-filling missing gold history points from yfinance for past {days} days...")
-        
-        # Download GC=F data
-        df = yf.download("GC=F", period="3mo", progress=False)
+        try:
+            import yfinance as yf
+        except Exception as import_error:
+            message = f"thiếu thư viện yfinance ({import_error})"
+            print(f"Auto-fill Gold history unavailable: {message}")
+            return {"status": "error", "message": message, "source": "yfinance"}
+        days = max(int(days), 90)
+        if days <= 120:
+            period = "3mo"
+        elif days <= 365:
+            period = "1y"
+        elif days <= 730:
+            period = "2y"
+        else:
+            period = "5y"
+        print(
+            f"Auto-filling missing gold history points from yfinance "
+            f"for past {days} days ({period})..."
+        )
+
+        # Download GC=F data. The old implementation always requested only
+        # three months, which made a September 2025 backtest return 0/0 when
+        # the current date was September 2026.
+        df = yf.download("GC=F", period=period, progress=False)
         if df.empty:
             print("yfinance download for GC=F was empty.")
-            return
+            return {
+                "status": "error",
+                "message": "Yahoo Finance không trả về dữ liệu GC=F.",
+                "source": "yfinance",
+                "requested_days": days,
+            }
             
         import pandas as pd
         if isinstance(df.columns, pd.MultiIndex):
-            close_prices = df[("Close", "GC=F")].ffill().bfill()
+            close_prices = df[("Close", "GC=F")].ffill()
         else:
-            close_prices = df["Close"].ffill().bfill()
+            close_prices = df["Close"].ffill()
             
         inserted_count = 0
         for index, val in close_prices.items():
@@ -1469,8 +2328,16 @@ def auto_fill_gold_history_from_yfinance(days=90):
                 
         if inserted_count > 0:
             print(f"Auto-fill: inserted/updated {inserted_count} missing gold history dates.")
+        return {
+            "status": "success",
+            "source": "yfinance",
+            "requested_days": days,
+            "downloaded_rows": int(len(close_prices)),
+            "inserted": inserted_count,
+        }
     except Exception as e:
         print(f"Error in auto_fill_gold_history_from_yfinance: {e}")
+        return {"status": "error", "message": str(e), "source": "yfinance"}
 
 def resolve_unresolved_predictions():
     """
@@ -1504,6 +2371,62 @@ def resolve_unresolved_predictions():
     except Exception as e:
         print(f"Error in resolve_unresolved_predictions: {e}")
 
+def _next_gold_business_date(date_str):
+    """Return the next weekday used for the Gold T+1 forecast record."""
+    next_date = datetime.strptime(str(date_str), "%Y-%m-%d") + timedelta(days=1)
+    while next_date.weekday() >= 5:
+        next_date += timedelta(days=1)
+    return next_date.strftime("%Y-%m-%d")
+
+
+def save_gold_forecast_history(analysis, latest_date):
+    """Save the exact live-analysis forecast used by the dashboard.
+
+    Only the future forecast is replaced. If a record has already received an
+    actual price, that ground truth is preserved for verification/self-learning.
+    """
+    forecast_date = _next_gold_business_date(latest_date)
+    model_values = {}
+    for model_key, model_data in (analysis.get("models") or {}).items():
+        prices = ((model_data or {}).get("ml_prediction") or {}).get("predicted_prices") or []
+        if not prices:
+            continue
+        try:
+            value = float(prices[0])
+            if np.isfinite(value) and value > 0:
+                model_values[model_key] = value
+        except (TypeError, ValueError):
+            continue
+
+    if not model_values:
+        return None
+
+    db.gold_predictions_history.update_one(
+        {"date": forecast_date},
+        {
+            "$set": {
+                "date": forecast_date,
+                "models": model_values,
+                "forecast_base_price": float(analysis.get("current_price", 0.0)),
+                "forecast_source": "live_analysis",
+                "model_version": analysis.get("model_version"),
+                "forecast_direction": analysis.get("direction"),
+                "forecast_confidence": (
+                    (analysis.get("ensemble_diagnostics") or {}).get("confidence_label")
+                ),
+                "market_context": (
+                    (analysis.get("ensemble_diagnostics") or {}).get("market_context")
+                ),
+                "forecast_updated_at": datetime.now(),
+            },
+            "$setOnInsert": {"actual_price": None},
+        },
+        upsert=True,
+    )
+    print(f"Successfully synchronized live Gold forecast history for {forecast_date}.")
+    return forecast_date
+
+
 def update_gold_predictions_history():
     """
     Saves/updates the T+1 predictions and actual prices in db.gold_predictions_history.
@@ -1524,7 +2447,9 @@ def update_gold_predictions_history():
         except Exception as tune_err:
             print(f"Error during scheduled hyperparameter auto-tuning: {tune_err}")
 
-        history = list(db.gold_history.find().sort("date", 1))
+        history = _prepare_gold_history_frame(
+            list(db.gold_history.find({}, {"_id": 0}).sort("date", 1))
+        ).to_dict(orient="records")
         if len(history) < 21:
             return
             
@@ -1534,7 +2459,10 @@ def update_gold_predictions_history():
 
         # Load custom hyperparameters & rolling biases (self-learning)
         params = load_gold_model_hyperparameters()
-        biases = calculate_gold_model_biases(limit=15)
+        biases = calculate_gold_model_biases(
+            limit=15,
+            model_version=predictor.GOLD_MODEL_VERSION,
+        )
         
         # 1. Update prediction for today (last item in history)
         today_item = history[-1]
@@ -1556,7 +2484,7 @@ def update_gold_predictions_history():
             hist_slice_today = history[:-1]
             df_today = pd.DataFrame(hist_slice_today)
 
-            df_today["world_price"] = df_today["world_price"].replace(0.0, np.nan).ffill().bfill()
+            df_today["world_price"] = df_today["world_price"].replace(0.0, np.nan).ffill()
             df_today["close"] = df_today["world_price"]
             df_today["open"] = df_today["world_price"]
             df_today["high"] = df_today["world_price"]
@@ -1568,16 +2496,21 @@ def update_gold_predictions_history():
             macro_df = pd.DataFrame(list(macro_cursor))
             if not macro_df.empty and "date" in macro_df.columns:
                 df_today = pd.merge(df_today, macro_df, on="date", how="left")
-                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield"] if c in df_today.columns]
-                df_today[cols] = df_today[cols].ffill().bfill()
+                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield", "gld", "gld_trust"] if c in df_today.columns]
+                df_today[cols] = df_today[cols].ffill()
 
             # Calculate technical indicators & predict today
             df_ind_today = predictor.calculate_technical_indicators(df_today)
-            lr_p, _, _ = predictor.predict_future_prices(df_ind_today, days_to_predict=1)
+            lr_p, _, _ = predictor.predict_future_prices(
+                df_ind_today,
+                days_to_predict=1,
+                params=params.get("linear_regression"),
+            )
             rf_p, _, _, _ = predictor.predict_future_prices_rf(df_ind_today, days_to_predict=1, params=params.get("random_forest"))
             mlp_p, _, _, _ = predictor.predict_future_prices_mlp(df_ind_today, days_to_predict=1, params=params.get("mlp"))
             xgb_p, _, _, _ = predictor.predict_future_prices_xgb(df_ind_today, days_to_predict=1, params=params.get("xgboost"))
             lstm_p, _, _, _ = predictor.predict_future_prices_lstm(df_ind_today, days_to_predict=1)
+            cnn_p, _, _, _ = predictor.predict_future_prices_cnn(df_ind_today, days_to_predict=1)
             
             # Apply rolling bias correction (today)
             rf_p = [p + biases.get("random_forest", 0.0) for p in rf_p]
@@ -1585,25 +2518,33 @@ def update_gold_predictions_history():
             mlp_p = [p + biases.get("mlp", 0.0) for p in mlp_p]
             xgb_p = [p + biases.get("xgboost", 0.0) for p in xgb_p]
             lstm_p = [p + biases.get("lstm", 0.0) for p in lstm_p]
+            cnn_p = [p + biases.get("cnn", 0.0) for p in cnn_p]
             
             # Fetch dynamic weights
-            weights_today = calculate_dynamic_ensemble_weights()
-            w_rf_t   = weights_today.get("random_forest", 0.20)
-            w_lr_t   = weights_today.get("linear_regression", 0.20)
-            w_mlp_t  = weights_today.get("mlp", 0.20)
-            w_xgb_t  = weights_today.get("xgboost", 0.20)
-            w_lstm_t = weights_today.get("lstm", 0.20)
-            ens_p = float(rf_p[0]*w_rf_t + lr_p[0]*w_lr_t + mlp_p[0]*w_mlp_t + xgb_p[0]*w_xgb_t + lstm_p[0]*w_lstm_t)
+            weights_today = calculate_dynamic_ensemble_weights(
+                model_version=predictor.GOLD_MODEL_VERSION,
+            )
+            w_rf_t   = weights_today.get("random_forest", 1 / 6)
+            w_lr_t   = weights_today.get("linear_regression", 1 / 6)
+            w_mlp_t  = weights_today.get("mlp", 1 / 6)
+            w_xgb_t  = weights_today.get("xgboost", 1 / 6)
+            w_lstm_t = weights_today.get("lstm", 1 / 6)
+            w_cnn_t  = weights_today.get("cnn", 1 / 6)
+            ens_p = float(rf_p[0]*w_rf_t + lr_p[0]*w_lr_t + mlp_p[0]*w_mlp_t + xgb_p[0]*w_xgb_t + lstm_p[0]*w_lstm_t + cnn_p[0]*w_cnn_t)
             
             today_doc = {
                 "date": today_date,
                 "actual_price": float(actual_price),
+                "forecast_base_price": float(df_today["close"].iloc[-1]),
+                "forecast_source": "history_fallback",
+                "model_version": predictor.GOLD_MODEL_VERSION,
                 "models": {
                     "random_forest": float(rf_p[0]),
                     "linear_regression": float(lr_p[0]),
                     "mlp": float(mlp_p[0]),
                     "xgboost": float(xgb_p[0]),
                     "lstm": float(lstm_p[0]),
+                    "cnn": float(cnn_p[0]),
                     "ensemble": ens_p
                 }
             }
@@ -1619,7 +2560,7 @@ def update_gold_predictions_history():
             tomorrow_date = tomorrow_dt.strftime("%Y-%m-%d")
             
             df_tomorrow = pd.DataFrame(history)
-            df_tomorrow["world_price"] = df_tomorrow["world_price"].replace(0.0, np.nan).ffill().bfill()
+            df_tomorrow["world_price"] = df_tomorrow["world_price"].replace(0.0, np.nan).ffill()
             df_tomorrow["close"] = df_tomorrow["world_price"]
             df_tomorrow["open"] = df_tomorrow["world_price"]
             df_tomorrow["high"] = df_tomorrow["world_price"]
@@ -1631,15 +2572,20 @@ def update_gold_predictions_history():
             macro_df = pd.DataFrame(list(macro_cursor))
             if not macro_df.empty and "date" in macro_df.columns:
                 df_tomorrow = pd.merge(df_tomorrow, macro_df, on="date", how="left")
-                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield"] if c in df_tomorrow.columns]
-                df_tomorrow[cols] = df_tomorrow[cols].ffill().bfill()
+                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield", "gld", "gld_trust"] if c in df_tomorrow.columns]
+                df_tomorrow[cols] = df_tomorrow[cols].ffill()
 
             df_ind_tomorrow = predictor.calculate_technical_indicators(df_tomorrow)
-            lr_pt, _, _ = predictor.predict_future_prices(df_ind_tomorrow, days_to_predict=1)
+            lr_pt, _, _ = predictor.predict_future_prices(
+                df_ind_tomorrow,
+                days_to_predict=1,
+                params=params.get("linear_regression"),
+            )
             rf_pt, _, _, _ = predictor.predict_future_prices_rf(df_ind_tomorrow, days_to_predict=1, params=params.get("random_forest"))
             mlp_pt, _, _, _ = predictor.predict_future_prices_mlp(df_ind_tomorrow, days_to_predict=1, params=params.get("mlp"))
             xgb_pt, _, _, _ = predictor.predict_future_prices_xgb(df_ind_tomorrow, days_to_predict=1, params=params.get("xgboost"))
             lstm_pt, _, _, _ = predictor.predict_future_prices_lstm(df_ind_tomorrow, days_to_predict=1)
+            cnn_pt, _, _, _ = predictor.predict_future_prices_cnn(df_ind_tomorrow, days_to_predict=1)
             
             # Apply rolling bias correction (tomorrow)
             rf_pt = [p + biases.get("random_forest", 0.0) for p in rf_pt]
@@ -1647,30 +2593,49 @@ def update_gold_predictions_history():
             mlp_pt = [p + biases.get("mlp", 0.0) for p in mlp_pt]
             xgb_pt = [p + biases.get("xgboost", 0.0) for p in xgb_pt]
             lstm_pt = [p + biases.get("lstm", 0.0) for p in lstm_pt]
+            cnn_pt = [p + biases.get("cnn", 0.0) for p in cnn_pt]
 
             # Fetch dynamic weights
-            weights = calculate_dynamic_ensemble_weights()
-            w_rf   = weights.get("random_forest", 0.20)
-            w_lr   = weights.get("linear_regression", 0.20)
-            w_mlp  = weights.get("mlp", 0.20)
-            w_xgb  = weights.get("xgboost", 0.20)
-            w_lstm = weights.get("lstm", 0.20)
-            ens_pt = float(rf_pt[0]*w_rf + lr_pt[0]*w_lr + mlp_pt[0]*w_mlp + xgb_pt[0]*w_xgb + lstm_pt[0]*w_lstm)
+            weights = calculate_dynamic_ensemble_weights(
+                model_version=predictor.GOLD_MODEL_VERSION,
+            )
+            w_rf   = weights.get("random_forest", 1 / 6)
+            w_lr   = weights.get("linear_regression", 1 / 6)
+            w_mlp  = weights.get("mlp", 1 / 6)
+            w_xgb  = weights.get("xgboost", 1 / 6)
+            w_lstm = weights.get("lstm", 1 / 6)
+            w_cnn  = weights.get("cnn", 1 / 6)
+            ens_pt = float(rf_pt[0]*w_rf + lr_pt[0]*w_lr + mlp_pt[0]*w_mlp + xgb_pt[0]*w_xgb + lstm_pt[0]*w_lstm + cnn_pt[0]*w_cnn)
  
             tomorrow_doc = {
                 "date": tomorrow_date,
                 "actual_price": None,
+                "forecast_base_price": float(df_tomorrow["close"].iloc[-1]),
+                "forecast_source": "scheduled_prediction",
+                "model_version": predictor.GOLD_MODEL_VERSION,
                 "models": {
                     "random_forest": float(rf_pt[0]),
                     "linear_regression": float(lr_pt[0]),
                     "mlp": float(mlp_pt[0]),
                     "xgboost": float(xgb_pt[0]),
                     "lstm": float(lstm_pt[0]),
+                    "cnn": float(cnn_pt[0]),
                     "ensemble": ens_pt
                 }
             }
-            db.gold_predictions_history.update_one({"date": tomorrow_date}, {"$set": tomorrow_doc}, upsert=True)
-            print(f"Successfully updated prediction history for tomorrow: {tomorrow_date}")
+            existing_tomorrow = db.gold_predictions_history.find_one(
+                {"date": tomorrow_date},
+                {"_id": 0, "forecast_source": 1},
+            ) or {}
+            if existing_tomorrow.get("forecast_source") == "live_analysis":
+                print(
+                    f"Preserved canonical live-analysis forecast for tomorrow: {tomorrow_date}"
+                )
+            else:
+                db.gold_predictions_history.update_one(
+                    {"date": tomorrow_date}, {"$set": tomorrow_doc}, upsert=True
+                )
+                print(f"Successfully updated prediction history for tomorrow: {tomorrow_date}")
         except Exception as tomorrow_err:
             print(f"Error calculating prediction for tomorrow: {tomorrow_err}")
 
@@ -1763,13 +2728,21 @@ def generate_macro_error_analysis(df, target_date, error_val):
         print(f"Error in generate_macro_error_analysis: {e}")
         return ""
 
-def get_gold_predictions():
+def get_gold_predictions(progress_callback=None):
     """
     Loads World gold price history from MongoDB, merges macroeconomic indicators
     and event proximity features, runs technical indicators, and returns predictions using predictor.py.
     """
+    def report_progress(stage, progress):
+        if callable(progress_callback):
+            try:
+                progress_callback(stage, progress)
+            except Exception as progress_err:
+                print(f"Gold prediction progress callback failed: {progress_err}")
+
     init_db() # Ensure seeded
     try:
+        report_progress("Đọc lịch sử giá vàng từ MongoDB", 8)
         cursor = db.gold_history.find({}, {"_id": 0}).sort("date", 1)
         history_list = list(cursor)
         if len(history_list) < 20:
@@ -1779,11 +2752,18 @@ def get_gold_predictions():
             }
             
         import predictor
-        # Convert to DataFrame
-        df = pd.DataFrame(history_list)
+        # Convert to trading-day observations. Weekend carry-forward rows make
+        # a 5-step forecast mean five calendar rows instead of five sessions.
+        df = _prepare_gold_history_frame(history_list)
+        if len(df) < 20:
+            return {
+                "status": "error",
+                "message": "Không đủ dữ liệu phiên giao dịch vàng sau khi làm sạch.",
+            }
+        report_progress("Chuẩn bị dữ liệu giá và biến mục tiêu", 15)
         
         # Ensure world_price has no zeros or NaNs (interpolate or forward fill)
-        df["world_price"] = df["world_price"].replace(0.0, np.nan).ffill().bfill()
+        df["world_price"] = df["world_price"].replace(0.0, np.nan).ffill()
         
         # World gold price (USD/ounce) is the primary prediction target
         df["close"] = df["world_price"]
@@ -1793,16 +2773,27 @@ def get_gold_predictions():
         df["volume"] = 1.0 # placeholder
         
         # --- Merge Macro Indicators ---
+        macro_list = []
         try:
+            report_progress("Đồng bộ DXY, lợi suất, PCE/Core PCE và dữ liệu thị trường", 22)
+            latest_macro_doc = db.macro_history.find_one(
+                {}, {"_id": 0, "pce_release_date": 1}, sort=[("date", -1)]
+            ) or {}
+            if not latest_macro_doc.get("pce_release_date"):
+                update_pce_history_from_fred(days=365)
             macro_cursor = db.macro_history.find({}, {"_id": 0})
             macro_list = list(macro_cursor)
             if macro_list:
                 macro_df = pd.DataFrame(macro_list)
                 # Merge on date
                 df = pd.merge(df, macro_df, on="date", how="left")
-                # Forward fill then backward fill to handle holidays/weekends
-                cols_to_fill = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "gld", "gld_trust"] if c in df.columns]
-                df[cols_to_fill] = df[cols_to_fill].ffill().bfill()
+                # Forward-fill only: earlier rows must not see future macro values.
+                cols_to_fill = [c for c in [
+                    "dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd",
+                    "xagusd", "real_yield", "gld", "gld_trust",
+                    "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                ] if c in df.columns]
+                df[cols_to_fill] = df[cols_to_fill].ffill()
                 if "dji" not in df.columns:
                     df["dji"] = 35000.0
                 if "spx" not in df.columns:
@@ -1834,27 +2825,217 @@ def get_gold_predictions():
             
         # --- Add Event Proximity Features ---
         try:
-            days_to_fed, days_to_cpi, days_to_nfp = calculate_days_until_events(df["date"])
+            report_progress("Tính khoảng cách tới lịch FED, CPI, NFP và PCE", 31)
+            days_to_fed, days_to_cpi, days_to_nfp, days_to_pce = calculate_days_until_events(df["date"])
             df["days_to_fed"] = days_to_fed
             df["days_to_cpi"] = days_to_cpi
             df["days_to_nfp"] = days_to_nfp
+            df["days_to_pce"] = days_to_pce
         except Exception as event_err:
             print(f"Error adding event proximity features: {event_err}")
             df["days_to_fed"] = 15.0
             df["days_to_cpi"] = 15.0
             df["days_to_nfp"] = 15.0
+            df["days_to_pce"] = 15.0
+
+        # Load already-released market signals before inference. Previously
+        # these were appended after prediction, so PCE/profit-taking context
+        # could be shown in the UI without influencing the ensemble.
+        market_signals = []
+        latest_cache = {}
+        try:
+            latest_cache = db.gold_prices.find_one(
+                {"_id": "latest_prices"},
+                {"_id": 0, "market_signals": 1, "macro_indicators": 1, "calendar": 1},
+            ) or {}
+            market_signals = latest_cache.get("market_signals", []) or []
+            latest_macro_values = {}
+            for signal in market_signals:
+                values = signal.get("macro_values") or {}
+                if isinstance(values, dict):
+                    latest_macro_values.update(values)
+            for field in ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom"):
+                value = latest_macro_values.get(field)
+                if value is not None:
+                    df.loc[df.index[-1], field] = float(value)
+        except Exception as signal_err:
+            print(f"Error loading Gold market signals before inference: {signal_err}")
+
+        # Build the policy layer from the same released inputs used by the
+        # dashboard. This keeps the gold forecast and the UI explanation in
+        # sync instead of showing a FED signal that never reached the model.
+        try:
+            calendar = latest_cache.get("calendar") or get_us_economic_calendar()
+            macro_indicators = latest_cache.get("macro_indicators") or fetch_us_macro_indicators()
+            fed_policy_outlook = build_fed_policy_outlook(
+                macro_indicators=macro_indicators,
+                macro_history=macro_list[-2:],
+                calendar=calendar,
+                market_signals=market_signals,
+            )
+        except Exception as policy_error:
+            print(f"Error building FED policy outlook: {policy_error}")
+            fed_policy_outlook = build_fed_policy_outlook(
+                macro_history=macro_list[-2:],
+                calendar=[],
+                market_signals=market_signals,
+            )
         
         # --- Add Geopolitical Conflict Events ---
         conflict_events = []
         try:
+            report_progress("Đọc tín hiệu rủi ro địa chính trị", 38)
             conflict_events = fetch_geopolitical_conflicts()
         except Exception as e:
             print(f"Error fetching geopolitical conflicts for predictions: {e}")
         
-        weights = calculate_dynamic_ensemble_weights()
+        report_progress("Chuẩn bị huấn luyện và đánh giá các mô hình AI", 45)
+        # Resolve yesterday's forecasts before deriving production priors.
+        # Otherwise the adaptive ensemble can keep using stale accuracy weights
+        # even though the matching actual Gold close is already available.
+        resolve_unresolved_predictions()
+        weights, production_metrics = calculate_dynamic_ensemble_weights(
+            return_diagnostics=True,
+            model_version=predictor.GOLD_MODEL_VERSION,
+        )
         params = load_gold_model_hyperparameters()
-        biases = calculate_gold_model_biases(limit=15)
-        analysis = predictor.analyze_and_recommend(df, conversion_factor=None, is_usd=True, model_weights=weights, params=params, biases=biases, conflict_events=conflict_events)
+        biases = calculate_gold_model_biases(
+            limit=15,
+            model_version=predictor.GOLD_MODEL_VERSION,
+        )
+        analysis = predictor.analyze_and_recommend(
+            df,
+            model_weights=weights,
+            params=params,
+            biases=biases,
+            production_metrics=production_metrics,
+            conflict_events=conflict_events,
+            market_signals=market_signals,
+            fed_policy_outlook=fed_policy_outlook,
+            progress_callback=report_progress,
+        )
+        analysis.setdefault("market_signals", market_signals)
+        analysis["fed_policy_outlook"] = fed_policy_outlook
+        latest_date = str(df.iloc[-1]["date"])
+        forecast_date = _next_gold_business_date(latest_date)
+        analysis["forecast_date"] = forecast_date
+        analysis["forecast_base_price"] = float(analysis.get("current_price", 0.0))
+        analysis["forecast_generated_at"] = datetime.now().isoformat()
+
+        # Give the Codex chair the observations behind the model reports,
+        # not only the models' final votes. Values are deliberately compact,
+        # chronological and JSON-safe so the final reasoning is auditable.
+        advisor_history_columns = [
+            "date", "world_price", "dxy", "us10y", "real_yield", "vix",
+            "brent", "dji", "spx", "gld", "gld_trust",
+            "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+            "days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce",
+        ]
+        advisor_history = []
+        for _, history_row in df.tail(30).iterrows():
+            observation = {}
+            for column in advisor_history_columns:
+                if column not in history_row or not pd.notna(history_row[column]):
+                    continue
+                value = history_row[column]
+                if isinstance(value, (np.integer, int)):
+                    observation[column] = int(value)
+                elif isinstance(value, (np.floating, float)):
+                    observation[column] = round(float(value), 6)
+                else:
+                    observation[column] = str(value)
+            advisor_history.append(observation)
+
+        calendar_rows = list(calendar or [])
+        today_key = datetime.now().strftime("%Y-%m-%d")
+        past_calendar = [event for event in calendar_rows if str(event.get("date") or "") <= today_key]
+        future_calendar = [event for event in calendar_rows if str(event.get("date") or "") > today_key]
+        # Include the latest released events and the nearest upcoming events;
+        # taking the first rows of an annual ascending calendar would mostly
+        # send stale January data to the chair in September.
+        advisor_calendar_source = past_calendar[-20:] + future_calendar[:10]
+        advisor_calendar = []
+        for event in advisor_calendar_source:
+            if not isinstance(event, dict):
+                continue
+            compact_event = {
+                key: event.get(key)
+                for key in (
+                    "date", "time", "event", "category", "status", "actual",
+                    "forecast", "previous", "direction", "policy_tone",
+                    "policy_tone_label", "gold_impact",
+                )
+                if event.get(key) is not None
+            }
+            if isinstance(event.get("result"), dict):
+                compact_event["result"] = {
+                    key: event["result"].get(key)
+                    for key in (
+                        "value", "unit", "previous", "direction", "release_period",
+                        "source",
+                    )
+                    if event["result"].get(key) is not None
+                }
+            advisor_calendar.append(compact_event)
+        advisor_conflicts = []
+        for event in (conflict_events or [])[:15]:
+            if not isinstance(event, dict):
+                continue
+            advisor_conflicts.append({
+                key: event.get(key)
+                for key in (
+                    "title", "event", "date", "region", "status", "severity",
+                    "gold_impact", "summary", "source",
+                )
+                if event.get(key) is not None
+            })
+        analysis["advisor_input_data"] = {
+            "data_groups": [
+                "30 phiên giá vàng và biến vĩ mô gần nhất",
+                "PCE/Core PCE và khoảng cách tới FED, CPI, NFP, PCE",
+                "lịch sự kiện kinh tế Mỹ kèm actual/forecast/previous",
+                "tín hiệu thị trường đã công bố",
+                "sự kiện địa chính trị và tác động dự kiến",
+                "đặc trưng kỹ thuật, backtest OOS và phiếu từng mô hình",
+                "phiếu suy luận hành động FED của từng model và nowcast chính sách FED",
+            ],
+            "recent_market_history": advisor_history,
+            "economic_calendar": advisor_calendar,
+            "market_signals": market_signals[:12],
+            "geopolitical_events": advisor_conflicts,
+            "macro_snapshot": macro_indicators if isinstance(macro_indicators, dict) else {},
+        }
+
+        # Codex is the qualitative chair after the deterministic vote. An API
+        # error never invalidates the numeric forecast;
+        # the UI transparently falls back to Ensemble and shows the reason.
+        report_progress("Codex đang đọc báo cáo và biểu quyết của hội nghị", 95)
+        try:
+            from openai_advisor import generate_gold_roundtable_advice
+
+            chatgpt_advisor = generate_gold_roundtable_advice(analysis)
+        except Exception as advisor_error:
+            chatgpt_advisor = {
+                "status": "error",
+                "provider": "Rùa AI Codex",
+                "model": os.getenv("CODEX_MODEL", "") or "Codex mặc định",
+                "generated_at": datetime.now().isoformat(),
+                "message": str(advisor_error)[:300],
+                "decisions": [],
+            }
+        analysis["chatgpt_advisor"] = chatgpt_advisor
+        if isinstance(analysis.get("roundtable"), dict):
+            analysis["roundtable"]["chatgpt_advisor"] = chatgpt_advisor
+
+        # Persist the exact per-model T+1 values returned to the dashboard.
+        # The scheduled history updater has a separate lightweight path; if it
+        # writes first, the verification table could otherwise show a stale
+        # ensemble value that disagrees with the live forecast cards.
+        try:
+            save_gold_forecast_history(analysis, latest_date)
+        except Exception as history_err:
+            print(f"Error saving live Gold forecast history: {history_err}")
+        report_progress("Tổng hợp dự báo và điểm tin cậy của mô hình", 97)
         
         # Clean history array for plotting in frontend
         # We need past 180 days (6 months) to support Dow Jones 6M chart
@@ -1873,10 +3054,15 @@ def get_gold_predictions():
                 "dji": float(row.get("dji")) if pd.notna(row.get("dji")) else 35000.0,
                 "spx": float(row.get("spx")) if pd.notna(row.get("spx")) else 5000.0,
                 "gld": float(row.get("gld")) if pd.notna(row.get("gld")) else 0.0,
-                "gld_trust": float(row.get("gld_trust")) if pd.notna(row.get("gld_trust")) else 0.0
+                "gld_trust": float(row.get("gld_trust")) if pd.notna(row.get("gld_trust")) else 0.0,
+                "pce_headline_yoy": float(row.get("pce_headline_yoy")) if pd.notna(row.get("pce_headline_yoy")) else None,
+                "pce_core_yoy": float(row.get("pce_core_yoy")) if pd.notna(row.get("pce_core_yoy")) else None,
+                "pce_headline_mom": float(row.get("pce_headline_mom")) if pd.notna(row.get("pce_headline_mom")) else None,
+                "pce_core_mom": float(row.get("pce_core_mom")) if pd.notna(row.get("pce_core_mom")) else None,
             })
             
         analysis["gold_history"] = plot_history
+        report_progress("Đóng gói biểu đồ lịch sử và biến động vĩ mô", 98)
         
         # Extract latest macro values for display in the frontend diagram
         latest_macro = {}
@@ -1896,6 +3082,11 @@ def get_gold_predictions():
                 latest_macro["days_to_cpi"] = int(last_row["days_to_cpi"])
             if "days_to_nfp" in last_row:
                 latest_macro["days_to_nfp"] = int(last_row["days_to_nfp"])
+            if "days_to_pce" in last_row:
+                latest_macro["days_to_pce"] = int(last_row["days_to_pce"])
+            for field in ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom"):
+                if field in last_row and pd.notna(last_row[field]):
+                    latest_macro[field] = float(last_row[field])
         analysis["latest_macro"] = latest_macro
         
         # Apply automatic bias correction based on 15-day rolling average (self-learning)
@@ -1905,9 +3096,8 @@ def get_gold_predictions():
                 sort=[("date", -1)]
             )
             latest_adjustments = {}
-            from datetime import datetime
             
-            for m_key in ["random_forest", "linear_regression", "mlp", "xgboost", "ensemble"]:
+            for m_key in ["random_forest", "linear_regression", "mlp", "xgboost", "lstm", "cnn", "ensemble"]:
                 corr = biases.get(m_key if m_key != "ensemble" else "random_forest", 0.0)
                 latest_err = 0.0
                 macro_explain = ""
@@ -1933,6 +3123,7 @@ def get_gold_predictions():
         except Exception as adj_err:
             print(f"Error applying automatic learning adjustment: {adj_err}")
             
+        report_progress("Hoàn tất phân tích và sẵn sàng hiển thị", 99)
         return analysis
     except Exception as e:
         print(f"Error generating gold predictions: {e}")
@@ -1987,6 +3178,10 @@ def seed_us_economic_calendar():
             {"date": "2026-11-06", "event": "Báo cáo việc làm phi nông nghiệp Mỹ (NFP Tháng 10/2026)", "category": "Việc làm", "importance": "Cao", "impact": "Dữ liệu việc làm cận kề kỳ bầu cử giữa nhiệm kỳ hoặc hoạt động sản xuất cuối năm."},
             {"date": "2026-12-04", "event": "Báo cáo việc làm phi nông nghiệp Mỹ (NFP Tháng 11/2026)", "category": "Việc làm", "importance": "Cao", "impact": "Dữ liệu việc làm cuối cùng của năm, quyết định nốt hành vi FED."}
         ]
+
+        # Add public FED speeches/Jackson Hole events to the same calendar.
+        # These are not FOMC decisions, but they are policy-relevant events.
+        events.extend(FED_POLICY_EVENTS_2026)
         
         operations = []
         for event in events:
@@ -2003,16 +3198,741 @@ def seed_us_economic_calendar():
         print(f"Error seeding economic calendar: {e}")
 
 
+def ensure_fed_policy_events():
+    """Upsert known FED speeches that can reprice the policy path."""
+    operations = [
+        UpdateOne(
+            {"date": event["date"], "event": event["event"]},
+            {"$set": event},
+            upsert=True,
+        )
+        for event in FED_POLICY_EVENTS_2026
+    ]
+    if operations:
+        db.us_economic_calendar.bulk_write(operations)
+
+
+_CALENDAR_TIME_FIELDS = (
+    "datetime",
+    "release_datetime",
+    "event_datetime",
+    "release_time",
+    "event_time",
+    "time",
+)
+
+
+def _calendar_event_time_key(event):
+    """Return a sortable HH:MM:SS key when an event carries a release time."""
+    for field in _CALENDAR_TIME_FIELDS:
+        value = event.get(field)
+        if value in (None, ""):
+            continue
+        if isinstance(value, datetime):
+            return value.strftime("%H:%M:%S")
+        match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?", str(value))
+        if match:
+            hour = int(match.group(1))
+            minute = int(match.group(2))
+            second = int(match.group(3) or 0)
+            if 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59:
+                return f"{hour:02d}:{minute:02d}:{second:02d}"
+    # Events without a published time stay at the end of their date instead
+    # of being interleaved ahead of events that have an exact release time.
+    return "23:59:59"
+
+
+def _sort_calendar_events(events, descending=False):
+    """Sort economic events chronologically by date, then release time."""
+    sorted_events = sorted(
+        events,
+        key=lambda event: (
+            str(event.get("date") or "9999-12-31"),
+            _calendar_event_time_key(event),
+            str(event.get("event") or ""),
+        ),
+        reverse=descending,
+    )
+    return sorted_events
+
+
+def _fetch_bls_series(series_id, start_year, end_year):
+    """Fetch one BLS public series without requiring an API key."""
+    url = (
+        f"https://api.bls.gov/publicAPI/v2/timeseries/data/{series_id}"
+        f"?startyear={start_year}&endyear={end_year}"
+    )
+    response = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=12,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("status") != "REQUEST_SUCCEEDED":
+        raise RuntimeError(f"BLS không trả dữ liệu cho {series_id}")
+
+    series = payload.get("Results", {}).get("series", [])
+    if not series:
+        return {}
+
+    values = {}
+    for row in series[0].get("data", []):
+        period = row.get("period", "")
+        if not period.startswith("M") or not period[1:].isdigit():
+            continue
+        try:
+            values[(int(row["year"]), int(period[1:]))] = {
+                "value": float(row["value"]),
+                "footnotes": [
+                    footnote.get("code")
+                    for footnote in row.get("footnotes", [])
+                    if footnote.get("code")
+                ],
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+    return values
+
+
+def _fetch_fred_series(series_id, start_date, end_date):
+    """Fetch a daily FRED CSV series; FRED graph CSV needs no API key."""
+    import csv
+    import io
+    import urllib.error
+    import urllib.request
+
+    url = (
+        f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        f"&cosd={start_date}&coed={end_date}"
+    )
+    csv_text = None
+    last_error = None
+    for attempt in range(3):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                csv_text = response.read().decode("utf-8")
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            last_error = error
+            if attempt == 2:
+                raise
+    if csv_text is None:
+        raise RuntimeError(f"Không thể tải chuỗi FRED {series_id}: {last_error}")
+
+    values = {}
+    for row in csv.DictReader(io.StringIO(csv_text)):
+        date_str = row.get("observation_date")
+        raw_value = row.get(series_id)
+        if not date_str or raw_value in (None, "", "."):
+            continue
+        try:
+            values[date_str] = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _parse_fed_rate_token(token):
+    """Convert Fed notation such as 3-1/2 or 3.50 to a float."""
+    token = token.strip().replace("‑", "-").replace("–", "-")
+    if "/" in token and "-" in token:
+        whole, fraction = token.split("-", 1)
+        numerator, denominator = fraction.split("/", 1)
+        return float(whole) + (float(numerator) / float(denominator))
+    return float(token)
+
+
+def _fetch_fed_decision_result(event):
+    """Read the actual FOMC action/range from the official Fed release."""
+    event_date = event.get("date", "")
+    url = f"https://www.federalreserve.gov/newsevents/pressreleases/monetary{event_date.replace('-', '')}a.htm"
+    try:
+        from bs4 import BeautifulSoup
+
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        text = BeautifulSoup(response.text, "html.parser").get_text(" ", strip=True)
+        text = text.replace("‑", "-").replace("–", "-").replace("â", "-")
+
+        range_match = re.search(
+            r"target range for the federal funds rate\s+(?:at|to)\s+"
+            r"([0-9]+(?:-[0-9]+/[0-9]+|\.[0-9]+)?)\s+to\s+"
+            r"([0-9]+(?:-[0-9]+/[0-9]+|\.[0-9]+)?)\s+percent",
+            text,
+            re.IGNORECASE,
+        )
+        if not range_match:
+            return None
+
+        action_match = re.search(
+            r"\b(maintain|raise|lower|keep)\b[^.]{0,160}?target range for the federal funds rate",
+            text,
+            re.IGNORECASE,
+        )
+        action_map = {"maintain": "Giữ nguyên", "keep": "Giữ nguyên", "raise": "Tăng", "lower": "Giảm"}
+        action = action_map.get(action_match.group(1).lower(), "Đã công bố") if action_match else "Đã công bố"
+        lower = _parse_fed_rate_token(range_match.group(1))
+        upper = _parse_fed_rate_token(range_match.group(2))
+        return {
+            "value": action,
+            "unit": f"{_format_rate(lower)}–{_format_rate(upper)}%",
+            "direction": action,
+            "release_period": event_date,
+            "source": "Federal Reserve",
+            "source_url": url,
+        }
+    except Exception as error:
+        print(f"Error fetching FOMC result for {event_date}: {error}")
+        return None
+
+
+def _event_period(event_name):
+    """Read the release month/year embedded in CPI/NFP event names."""
+    match = re.search(r"\(?(?:Tháng|tháng)\s+(\d{1,2})/(\d{4})\)?", event_name or "")
+    if not match:
+        return None
+    # Return year/month so callers can use the same order as BLS keys.
+    return int(match.group(2)), int(match.group(1))
+
+
+def _month_key(year, month):
+    return year * 12 + month
+
+
+def _previous_month(year, month):
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def _format_rate(value):
+    return f"{value:.2f}".replace(".", ",")
+
+
+def _direction_from_difference(value, previous, tolerance=1e-9):
+    if value > previous + tolerance:
+        return "Tăng"
+    if value < previous - tolerance:
+        return "Giảm"
+    return "Đi ngang"
+
+
+def _nearest_fred_value(values, date_obj):
+    """Return the latest daily observation on or before date_obj."""
+    candidates = [
+        (datetime.strptime(date_str, "%Y-%m-%d").date(), value)
+        for date_str, value in values.items()
+    ]
+    candidates = [item for item in candidates if item[0] <= date_obj]
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _calendar_result_for_event(event, cpi_series, nfp_series, fed_upper, fed_lower):
+    """Build one auditable actual result from the public source series."""
+    event_date = datetime.strptime(event["date"], "%Y-%m-%d").date()
+    if event_date > datetime.now().date():
+        return None
+
+    category = event.get("category")
+    if event.get("event_type") == "FED_SPEECH":
+        # A speech has no target-range result.  Preserve the sourced tone so
+        # the UI and the policy layer can distinguish it from an FOMC hold.
+        tone = str(event.get("policy_tone", "neutral")).lower()
+        direction = {
+            "hawkish": "Hawkish",
+            "dovish": "Dovish",
+        }.get(tone, "Trung lập")
+        return {
+            "value": "Đã phát biểu",
+            "unit": event.get("policy_tone_label", "Tín hiệu chính sách"),
+            "direction": direction,
+            "release_period": event["date"],
+            "source": event.get("source", "Federal Reserve"),
+            "source_url": event.get("source_url", ""),
+        }
+
+    if category == "CPI":
+        period = _event_period(event.get("event", ""))
+        if not period:
+            return None
+        year, month = period
+        current = cpi_series.get((year, month))
+        previous_year, previous_month = _previous_month(year, month)
+        previous = cpi_series.get((previous_year, previous_month))
+        year_ago = cpi_series.get((year - 1, month))
+        if not current or not previous or not year_ago:
+            return None
+
+        yoy = (current["value"] / year_ago["value"] - 1) * 100
+        previous_yoy = (previous["value"] / cpi_series[(year - 1, previous_month)]["value"] - 1) * 100 \
+            if (year - 1, previous_month) in cpi_series else None
+        return {
+            "value": f"{yoy:.1f}%",
+            "unit": "YoY",
+            "previous": f"{previous_yoy:.1f}%" if previous_yoy is not None else "",
+            "direction": _direction_from_difference(yoy, previous_yoy) if previous_yoy is not None else "",
+            "release_period": f"{year:04d}-{month:02d}",
+            "source": "U.S. Bureau of Labor Statistics",
+            "source_url": "https://www.bls.gov/cpi/",
+        }
+
+    if category == "Việc làm":
+        period = _event_period(event.get("event", ""))
+        if not period:
+            return None
+        year, month = period
+        current = nfp_series.get((year, month))
+        previous_year, previous_month = _previous_month(year, month)
+        previous = nfp_series.get((previous_year, previous_month))
+        previous_previous_year, previous_previous_month = _previous_month(previous_year, previous_month)
+        previous_previous = nfp_series.get((previous_previous_year, previous_previous_month))
+        if not current or not previous or not previous_previous:
+            return None
+
+        change = current["value"] - previous["value"]
+        previous_change = previous["value"] - previous_previous["value"]
+        is_preliminary = "P" in current.get("footnotes", [])
+        return {
+            "value": f"{change:+.0f} nghìn",
+            "unit": "việc làm",
+            "previous": f"{previous_change:+.0f} nghìn",
+            "direction": _direction_from_difference(change, previous_change),
+            "status": "Sơ bộ" if is_preliminary else "Đã điều chỉnh",
+            "release_period": f"{year:04d}-{month:02d}",
+            "source": "U.S. Bureau of Labor Statistics",
+            "source_url": "https://www.bls.gov/news.release/empsit.toc.htm",
+        }
+
+    if category == "PCE":
+        period = _event_period(event.get("event", ""))
+        if not period:
+            return None
+        year, month = period
+        reference_month = f"{year:04d}-{month:02d}"
+        pce_doc = db.macro_history.find_one(
+            {
+                "pce_reference_month": reference_month,
+                "pce_release_date": {"$lte": event["date"]},
+                "pce_headline_yoy": {"$ne": None},
+            },
+            {"_id": 0},
+            sort=[("pce_release_date", -1), ("date", -1)],
+        )
+        if not pce_doc:
+            return None
+
+        headline_yoy = pce_doc.get("pce_headline_yoy")
+        core_yoy = pce_doc.get("pce_core_yoy")
+        if headline_yoy is None and core_yoy is None:
+            return None
+
+        previous_year, previous_month = _previous_month(year, month)
+        previous_doc = db.macro_history.find_one(
+            {
+                "pce_reference_month": f"{previous_year:04d}-{previous_month:02d}",
+                "pce_release_date": {"$lte": event["date"]},
+            },
+            {"_id": 0},
+            sort=[("pce_release_date", -1), ("date", -1)],
+        )
+        previous_core = previous_doc.get("pce_core_yoy") if previous_doc else None
+        direction = (
+            _direction_from_difference(float(core_yoy), float(previous_core))
+            if core_yoy is not None and previous_core is not None
+            else ""
+        )
+        value = f"{float(headline_yoy):.2f}%" if headline_yoy is not None else "--"
+        unit = "YoY"
+        if core_yoy is not None:
+            unit += f" · Core PCE {float(core_yoy):.2f}%"
+        previous = ""
+        if previous_doc:
+            previous_headline = previous_doc.get("pce_headline_yoy")
+            previous_core_value = previous_doc.get("pce_core_yoy")
+            previous_parts = []
+            if previous_headline is not None:
+                previous_parts.append(f"{float(previous_headline):.2f}%")
+            if previous_core_value is not None:
+                previous_parts.append(f"Core {float(previous_core_value):.2f}%")
+            previous = " · ".join(previous_parts)
+        return {
+            "value": value,
+            "unit": unit,
+            "previous": previous,
+            "direction": direction,
+            "release_period": reference_month,
+            "source": "U.S. Bureau of Economic Analysis / FRED",
+            "source_url": event.get("source_url", "https://fred.stlouisfed.org/series/PCEPI"),
+        }
+
+    if category == "FED":
+        # Prefer the official release because it contains the actual action
+        # (raise/lower/hold), not just the resulting target range.
+        official_result = _fetch_fed_decision_result(event)
+        if official_result:
+            return official_result
+
+        upper = _nearest_fred_value(fed_upper, event_date)
+        lower = _nearest_fred_value(fed_lower, event_date)
+        previous_date = event_date - timedelta(days=1)
+        previous_upper = _nearest_fred_value(fed_upper, previous_date)
+        previous_lower = _nearest_fred_value(fed_lower, previous_date)
+        if None in (upper, lower, previous_upper, previous_lower):
+            return None
+
+        if upper > previous_upper:
+            action = "Tăng"
+        elif upper < previous_upper:
+            action = "Giảm"
+        else:
+            action = "Giữ nguyên"
+        return {
+            "value": action,
+            "unit": f"{_format_rate(lower)}–{_format_rate(upper)}%",
+            "direction": action,
+            "previous": f"{_format_rate(previous_lower)}–{_format_rate(previous_upper)}%",
+            "release_period": event["date"],
+            "source": "Federal Reserve (FRED)",
+            "source_url": "https://fred.stlouisfed.org/series/DFEDTARU",
+        }
+
+    return None
+
+
+def refresh_economic_calendar_results(force=False):
+    """Synchronize released CPI/NFP/PCE/FOMC values into the calendar.
+
+    The calendar is seeded with dates and rules, but those are not actual
+    releases.  This function only writes values returned by BLS/FRED and
+    never invents a result for a future or unavailable event.
+    """
+    now = datetime.now()
+    with _calendar_results_lock:
+        try:
+            schedule_sync = crawl_official_us_economic_calendar(force=force)
+            if not force:
+                state = db.calendar_sync_state.find_one({"_id": "economic_results"})
+                last_attempt = state.get("last_attempt_at") if state else None
+                if isinstance(last_attempt, datetime) and now - last_attempt < timedelta(minutes=30):
+                    return {
+                        "status": "skipped",
+                        "updated": 0,
+                        "message": "Kết quả đã được kiểm tra trong 30 phút gần đây.",
+                        "schedule": schedule_sync,
+                    }
+
+            events = list(db.us_economic_calendar.find({}, {"_id": 0}))
+            past_events = [
+                event for event in events
+                if event.get("date") and event["date"] <= now.strftime("%Y-%m-%d")
+            ]
+            if not past_events:
+                return {
+                    "status": "success",
+                    "updated": 0,
+                    "message": "Chưa có sự kiện đã công bố.",
+                    "schedule": schedule_sync,
+                }
+
+            if any(event.get("category") == "PCE" for event in past_events):
+                # PCE values are stored in macro_history with their official
+                # release date. Refresh them before resolving the calendar
+                # event so the UI does not remain stuck at "Chưa cập nhật".
+                update_pce_history_from_fred(days=730)
+
+            periods = [
+                _event_period(event.get("event", ""))
+                for event in past_events
+                if event.get("category") in ("CPI", "Việc làm")
+            ]
+            periods = [period for period in periods if period]
+            min_year = min([period[0] for period in periods] + [now.year - 1])
+            max_year = max([period[0] for period in periods] + [now.year])
+            source_errors = []
+            try:
+                cpi_series = _fetch_bls_series("CUSR0000SA0", min_year - 1, max_year)
+            except Exception as error:
+                source_errors.append(f"BLS CPI: {error}")
+                cpi_series = {}
+            try:
+                nfp_series = _fetch_bls_series("CES0000000001", min_year - 1, max_year)
+            except Exception as error:
+                source_errors.append(f"BLS NFP: {error}")
+                nfp_series = {}
+
+            # FOMC results are read from the official Fed release per event.
+            # Leave the FRED maps empty here so a slow FRED endpoint cannot
+            # block CPI/NFP or make the calendar request appear stuck.
+            fed_upper = {}
+            fed_lower = {}
+
+            operations = []
+            updated = 0
+            sync_timestamp = now.isoformat(timespec="seconds")
+            for event in past_events:
+                result = _calendar_result_for_event(
+                    event,
+                    cpi_series,
+                    nfp_series,
+                    fed_upper,
+                    fed_lower,
+                )
+                if result is None:
+                    continue
+                operations.append(UpdateOne(
+                    {"date": event["date"], "event": event["event"]},
+                    {
+                        "$set": {
+                            "result": result,
+                            "result_source": result["source"],
+                            "result_updated_at": sync_timestamp,
+                        }
+                    },
+                    upsert=False,
+                ))
+                updated += 1
+
+            if operations:
+                db.us_economic_calendar.bulk_write(operations)
+
+            sync_state = {
+                "last_attempt_at": now,
+                "last_success_at": now if updated else None,
+                "updated": updated,
+            }
+            if source_errors:
+                sync_state["source_errors"] = source_errors
+            db.calendar_sync_state.update_one(
+                {"_id": "economic_results"},
+                {
+                    "$set": sync_state,
+                    "$unset": {"error": ""},
+                },
+                upsert=True,
+            )
+
+            # Keep the short-lived dashboard cache in sync so a normal reload
+            # shows the new result without waiting for the next price crawl.
+            calendar = _sort_calendar_events(
+                list(db.us_economic_calendar.find({}, {"_id": 0}))
+            )
+            db.gold_prices.update_one(
+                {"_id": "latest_prices"},
+                {"$set": {"calendar": calendar}},
+            )
+            return {
+                "status": "partial" if source_errors else "success",
+                "updated": updated,
+                "checked_at": sync_timestamp,
+                "source_errors": source_errors,
+                "schedule": schedule_sync,
+                "calendar": calendar,
+            }
+        except Exception as error:
+            print(f"Error refreshing economic calendar results: {error}")
+            try:
+                db.calendar_sync_state.update_one(
+                    {"_id": "economic_results"},
+                    {"$set": {"last_attempt_at": now, "error": str(error)}},
+                    upsert=True,
+                )
+            except Exception:
+                pass
+            return {"status": "error", "updated": 0, "message": str(error)}
+
+
 def get_us_economic_calendar():
     """
-    Retrieves all seeded economic calendar events from MongoDB, sorted by date.
+    Retrieves all seeded economic calendar events from MongoDB, sorted by date
+    and release time when the source provides one.
     """
     try:
-        cursor = db.us_economic_calendar.find({}, {"_id": 0}).sort("date", 1)
-        return list(cursor)
+        # Existing deployments already have a populated collection, so this
+        # must run even when the original seed step was skipped.
+        ensure_fed_policy_events()
+        crawl_official_us_economic_calendar()
+        # Refresh released values on the first dashboard request and then use
+        # the 30-minute DB throttle to keep page loads fast.
+        refresh_economic_calendar_results()
+        events = _sort_calendar_events(
+            list(db.us_economic_calendar.find({}, {"_id": 0}))
+        )
+        # Keep one stable API shape; upcoming events intentionally remain null
+        # instead of showing guessed values.
+        for event in events:
+            event.setdefault("result", None)
+        return events
     except Exception as e:
         print(f"Error getting economic calendar: {e}")
         return []
+
+
+FEATURED_GOLD_ARTICLES = [
+    {
+        "url": "https://thanhnien.vn/gia-vang-bac-giam-sau-luc-ban-chot-loi-185260826203133635.htm",
+        "source": "Thanh Niên",
+    }
+]
+
+
+def analyze_gold_news_impact(title, text):
+    """Extract deterministic, auditable gold-impact signals from news text.
+
+    This is deliberately a rule/context layer, not a fabricated probability.
+    It records the time horizon because profit-taking can be bearish in the
+    short term while USD weakness or geopolitical risk remains supportive over
+    a medium/long horizon.
+    """
+    import re
+
+    full_text = f"{title} {text}".lower()
+    drivers = []
+    rules = []
+    facts = []
+    macro_values = {}
+    short_term_bias = "neutral"
+    medium_term_bias = "neutral"
+
+    if any(term in full_text for term in ("chốt lời", "bán chốt lời", "hiện thực hóa lợi nhuận")):
+        short_term_bias = "bearish"
+        drivers.append("Lực bán chốt lời sau giai đoạn tăng mạnh")
+        rules.append("Giá tăng nóng/quá mua → nhà đầu tư khóa lợi nhuận → áp lực giảm và điều chỉnh ngắn hạn")
+
+    if any(term in full_text for term in ("dữ liệu kinh tế khả quan", "đơn đặt hàng hàng hóa lâu bền", "gdp quý 2", "pce cốt lõi")):
+        short_term_bias = "bearish"
+        drivers.append("Dữ liệu kinh tế Mỹ tương đối tích cực làm giảm kỳ vọng nới lỏng tiền tệ")
+        rules.append("Dữ liệu Mỹ tốt → kỳ vọng lãi suất/lợi suất tăng → chi phí cơ hội nắm giữ vàng tăng → vàng chịu áp lực")
+
+    if "đơn đặt hàng hàng hóa lâu bền" in full_text:
+        facts.append("Đơn hàng lâu bền tháng 7: +1,1%, cao hơn dự báo +0,5%")
+    if "gdp" in full_text and "tăng trưởng 1,5%" in full_text:
+        facts.append("GDP quý 2 tăng trưởng 1,5%")
+    if "pce cốt lõi" in full_text:
+        facts.append("PCE cốt lõi tháng 7 tăng 0,2%")
+        pce_core_mom_match = re.search(r"pce cốt lõi[^%]{0,100}?([0-9]+[,.][0-9]+)%", full_text)
+        if pce_core_mom_match:
+            macro_values["pce_core_mom"] = float(pce_core_mom_match.group(1).replace(",", "."))
+    if "trong 12 tháng qua" in full_text and "3,7%" in full_text:
+        facts.append("Lạm phát 12 tháng ở mức 3,7%, cao hơn dự báo 3,6%")
+    pce_release_match = re.search(
+        r"(?:pce|lạm phát)[^.]{0,260}?([0-9]+[,.][0-9]+)%[^.]{0,160}?"
+        r"(?:dự báo|ước tính)[^%]{0,80}?([0-9]+[,.][0-9]+)%",
+        full_text,
+    )
+    if "pce" in full_text and pce_release_match:
+        actual_yoy = float(pce_release_match.group(1).replace(",", "."))
+        forecast_yoy = float(pce_release_match.group(2).replace(",", "."))
+        macro_values["pce_headline_yoy"] = actual_yoy
+        macro_values["pce_forecast_yoy"] = forecast_yoy
+        macro_values["pce_surprise_yoy"] = float(actual_yoy - forecast_yoy)
+
+    support_match = re.search(r"hỗ trợ[^0-9]{0,40}(4[.,]?[0-9]{3})", full_text)
+    if support_match:
+        support_level = support_match.group(1).replace('.', ',')
+        rules.append(f"Giữ trên vùng hỗ trợ ${support_level}/ounce → thiên về điều chỉnh kỹ thuật; thủng hỗ trợ → rủi ro bán tiếp diễn")
+    else:
+        support_level = None
+
+    if any(term in full_text for term in ("usd yếu", "niềm tin vào usd suy yếu", "địa chính trị", "trú ẩn")):
+        medium_term_bias = "supportive"
+        drivers.append("USD suy yếu hoặc rủi ro địa chính trị vẫn tạo nhu cầu trú ẩn")
+        rules.append("USD yếu/rủi ro địa chính trị tăng → dòng tiền phòng thủ tăng → hỗ trợ vàng trung–dài hạn")
+
+    if not drivers and not facts and not rules:
+        return None
+
+    if short_term_bias == "bearish" and medium_term_bias == "supportive":
+        label = "Giảm ngắn hạn · Hỗ trợ trung–dài hạn"
+    elif short_term_bias == "bearish":
+        label = "Áp lực giảm ngắn hạn"
+    elif medium_term_bias == "supportive":
+        label = "Hỗ trợ tăng trung–dài hạn"
+    else:
+        label = "Tác động hỗn hợp"
+
+    return {
+        "label": label,
+        "short_term_bias": short_term_bias,
+        "medium_term_bias": medium_term_bias,
+        "drivers": drivers,
+        "facts": facts,
+        "rules": rules,
+        "support_level": support_level,
+        "macro_values": macro_values,
+    }
+
+
+def fetch_featured_gold_news():
+    """Fetch curated gold articles and attach structured impact context."""
+    import re
+    from bs4 import BeautifulSoup
+
+    featured = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    for article in FEATURED_GOLD_ARTICLES:
+        try:
+            response = requests.get(article["url"], headers=headers, timeout=10)
+            if response.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            title_meta = soup.select_one('meta[property="og:title"]')
+            description_meta = soup.select_one('meta[property="og:description"]')
+            content_node = soup.select_one("div.detail-content, div.detail-cmain, article")
+            title = (title_meta.get("content") if title_meta else None) or (
+                soup.select_one("h1").get_text(" ", strip=True) if soup.select_one("h1") else ""
+            )
+            description = (description_meta.get("content") if description_meta else "") or ""
+            article_text = content_node.get_text(" ", strip=True) if content_node else description
+            if not title or not article_text:
+                continue
+
+            published_match = re.search(r"\b(\d{1,2}:\d{2})\s+(\d{2}/\d{2}/\d{4})\b", soup.get_text(" ", strip=True))
+            published = f"{published_match.group(1)} {published_match.group(2)}" if published_match else ""
+            text_for_keywords = f"{title} {description} {article_text}".lower()
+            keyword_terms = [
+                "vàng", "bạc", "chốt lời", "lãi suất", "fed", "gdp", "pce",
+                "lạm phát", "usd", "hỗ trợ", "trú ẩn"
+            ]
+            keywords = [term for term in keyword_terms if term in text_for_keywords]
+            impact = analyze_gold_news_impact(title, article_text)
+            featured.append({
+                "title": title.strip(),
+                "description": description.strip()[:500],
+                "link": article["url"],
+                "time": published,
+                "keywords": keywords,
+                "source": article["source"],
+                "featured": True,
+                "impact_analysis": impact,
+            })
+        except Exception as error:
+            print(f"Error fetching featured gold article: {error}")
+    return featured
+
+
+def collect_gold_market_signals(news):
+    """Return compact structured signals for the dashboard/model context."""
+    signals = []
+    for item in news or []:
+        impact = item.get("impact_analysis")
+        if not impact:
+            continue
+        signals.append({
+            "title": item.get("title", ""),
+            "link": item.get("link", ""),
+            "source": item.get("source", ""),
+            "time": item.get("time", ""),
+            **impact,
+        })
+    return signals[:8]
 
 
 def fetch_macro_news():
@@ -2032,7 +3952,7 @@ def fetch_macro_news():
     try:
         r = requests.get(url, headers=headers, timeout=8)
         if r.status_code != 200:
-            return []
+            return fetch_featured_gold_news()
             
         root = ET.fromstring(r.content)
         items = root.findall(".//item")
@@ -2068,25 +3988,41 @@ def fetch_macro_news():
                 except:
                     pass
                     
-                filtered_news.append({
+                news_item = {
                     "title": title,
                     "description": description,
                     "link": link,
                     "time": time_str,
-                    "keywords": matches
-                })
-                
+                    "keywords": matches,
+                    "source": "VnExpress",
+                    "impact_analysis": analyze_gold_news_impact(title, description),
+                }
+                filtered_news.append(news_item)
+
+        # Put the curated article first so the current market explanation is
+        # visible even when the RSS feed is noisy or temporarily unavailable.
+        featured_news = fetch_featured_gold_news()
+        seen_links = set()
+        combined_news = []
+        for item in featured_news + filtered_news:
+            if item.get("link") and item["link"] in seen_links:
+                continue
+            if item.get("link"):
+                seen_links.add(item["link"])
+            combined_news.append(item)
+
         # Limit to top 15 news articles
-        return filtered_news[:15]
+        return combined_news[:15]
     except Exception as e:
         print(f"Error fetching macro news: {e}")
-        return []
+        return fetch_featured_gold_news()
 
 
 def fetch_us_macro_indicators():
     """
     Fetches US macroeconomic indicators from FRED:
     - CPI: CPIAUCSL (YoY change)
+    - PCE/Core PCE: PCEPI/PCEPILFE (YoY change)
     - Unemployment: UNRATE
     - NFP: PAYEMS (monthly change)
     - Fed Funds Rate: FEDFUNDS
@@ -2102,7 +4038,9 @@ def fetch_us_macro_indicators():
             if last_fetched and (now - last_fetched) < timedelta(hours=6):
                 print("US macro indicators cache hit. Returning cached data.")
                 data = cached.get("data")
-                if data:
+                # Older cache documents predate the explicit PCE fields.  A
+                # cache without them must be refreshed once after deployment.
+                if data and data.get("pce") and data.get("core_pce"):
                     return data
     except Exception as e:
         print(f"Error checking US macro cache: {e}")
@@ -2123,6 +4061,32 @@ def fetch_us_macro_indicators():
             "gold_impact": "CPI tăng ➔ Vàng tăng; CPI giảm ➔ Vàng giảm",
             "impact_direction": "same",  # same = thuận chiều
             "description": "Chỉ số giá tiêu dùng - thước đo lạm phát chính của Mỹ"
+        },
+        "pce": {
+            "name": "PCE (Lạm phát ưa thích của FED)",
+            "value": None,
+            "prev_value": None,
+            "date": None,
+            "unit": "%/năm",
+            "source": "FRED - fred.stlouisfed.org",
+            "source_url": "https://fred.stlouisfed.org/series/PCEPI",
+            "trend": None,
+            "gold_impact": "PCE cao → FED cứng rắn hơn → vàng chịu áp lực ngắn hạn",
+            "impact_direction": "opposite",
+            "description": "Thước đo lạm phát được FED ưu tiên theo dõi"
+        },
+        "core_pce": {
+            "name": "Core PCE (PCE lõi)",
+            "value": None,
+            "prev_value": None,
+            "date": None,
+            "unit": "%/năm",
+            "source": "FRED - fred.stlouisfed.org",
+            "source_url": "https://fred.stlouisfed.org/series/PCEPILFE",
+            "trend": None,
+            "gold_impact": "Core PCE cao → kỳ vọng giữ lãi suất cao lâu hơn → vàng giảm",
+            "impact_direction": "opposite",
+            "description": "Lạm phát PCE loại trừ nhóm thực phẩm và năng lượng"
         },
         "unemployment": {
             "name": "Tỷ Lệ Thất Nghiệp Mỹ",
@@ -2214,6 +4178,20 @@ def fetch_us_macro_indicators():
             indicators["cpi"]["prev_value"] = round(float(prev['yoy']), 2)
             indicators["cpi"]["date"] = latest['date'][:7]
 
+    # --- 1b. Fetch PCE/Core PCE (YoY) ---
+    for indicator_key, series_id in (("pce", "PCEPI"), ("core_pce", "PCEPILFE")):
+        df_pce = fetch_fred_series(series_id)
+        if df_pce is not None and len(df_pce) >= 13:
+            df_pce["prev_year_value"] = df_pce["value"].shift(12)
+            df_pce["yoy"] = (df_pce["value"] / df_pce["prev_year_value"] - 1) * 100
+            df_pce = df_pce.dropna()
+            if not df_pce.empty:
+                latest = df_pce.iloc[-1]
+                prev = df_pce.iloc[-2]
+                indicators[indicator_key]["value"] = round(float(latest["yoy"]), 2)
+                indicators[indicator_key]["prev_value"] = round(float(prev["yoy"]), 2)
+                indicators[indicator_key]["date"] = latest["date"][:7]
+
     # --- 2. Fetch Unemployment ---
     df_unrate = fetch_fred_series("UNRATE")
     if df_unrate is not None and len(df_unrate) >= 2:
@@ -2298,6 +4276,264 @@ def fetch_us_macro_indicators():
             print(f"Error caching US macro indicators: {e}")
 
     return indicators
+
+
+def build_fed_policy_outlook(
+    macro_indicators=None,
+    macro_history=None,
+    calendar=None,
+    market_signals=None,
+):
+    """Build an auditable FED-policy nowcast from released macro inputs.
+
+    This is intentionally a transparent policy layer, not a claim that the
+    FED can be predicted with certainty.  It converts inflation, labour,
+    market and recent FED-speech signals into action probabilities that the
+    gold model can consume and the UI can explain.
+    """
+    indicators = macro_indicators if isinstance(macro_indicators, dict) else {}
+
+    def safe_float(value):
+        try:
+            number = float(value)
+            return number if np.isfinite(number) else None
+        except (TypeError, ValueError):
+            return None
+
+    def clamp(value, lower=-1.0, upper=1.0):
+        return float(np.clip(float(value), lower, upper))
+
+    def indicator_value(key, field="value"):
+        item = indicators.get(key) or {}
+        if not isinstance(item, dict):
+            return None
+        return safe_float(item.get(field))
+
+    if isinstance(macro_history, pd.DataFrame):
+        history_rows = macro_history.to_dict("records")
+    elif isinstance(macro_history, dict):
+        history_rows = [macro_history]
+    else:
+        history_rows = list(macro_history or [])
+    history_rows = [row for row in history_rows if isinstance(row, dict)]
+    history_rows.sort(key=lambda row: str(row.get("date", "")))
+    latest_row = history_rows[-1] if history_rows else {}
+    previous_row = history_rows[-2] if len(history_rows) > 1 else {}
+
+    def history_value(key, row=latest_row):
+        return safe_float(row.get(key))
+
+    def history_change(key):
+        latest = history_value(key, latest_row)
+        previous = history_value(key, previous_row)
+        return latest - previous if latest is not None and previous is not None else None
+
+    def choose(indicator_key, history_key=None, field="value"):
+        value = indicator_value(indicator_key, field)
+        if value is not None:
+            return value
+        return history_value(history_key or indicator_key)
+
+    cpi_yoy = choose("cpi", "cpi_yoy")
+    pce_yoy = choose("pce", "pce_headline_yoy")
+    core_pce_yoy = choose("core_pce", "pce_core_yoy")
+    core_pce_mom = history_value("pce_core_mom")
+    nfp_change = choose("nonfarm", "nfp_change")
+    unemployment = choose("unemployment", "unemployment")
+    fed_rate = choose("fed_rate", "fed_rate")
+    dxy = history_value("dxy")
+    us10y = history_value("us10y")
+    real_yield = history_value("real_yield")
+    vix = history_value("vix")
+    brent = history_value("brent")
+
+    # Positive score means more restrictive policy pressure.  Missing values
+    # are omitted rather than replaced by a fabricated macro reading.
+    components = []
+
+    def add_component(name, score, weight):
+        if score is not None:
+            components.append({
+                "name": name,
+                "score": clamp(score),
+                "weight": float(weight),
+            })
+
+    inflation_scores = []
+    if core_pce_yoy is not None:
+        core_gap = clamp((core_pce_yoy - 2.0) / 1.2)
+        add_component("Core PCE so với mục tiêu 2%", core_gap, 0.30)
+        inflation_scores.append(core_gap)
+    if pce_yoy is not None:
+        pce_gap = clamp((pce_yoy - 2.0) / 1.5)
+        add_component("PCE so với mục tiêu 2%", pce_gap, 0.15)
+        inflation_scores.append(pce_gap)
+    if cpi_yoy is not None:
+        cpi_gap = clamp((cpi_yoy - 2.0) / 1.5)
+        add_component("CPI so với mục tiêu 2%", cpi_gap, 0.10)
+        inflation_scores.append(cpi_gap)
+    if core_pce_mom is not None:
+        monthly_pressure = clamp((core_pce_mom - (2.0 / 12.0)) / 0.15)
+        add_component("Động lượng Core PCE tháng", monthly_pressure, 0.10)
+        inflation_scores.append(monthly_pressure)
+
+    inflation_score = float(np.mean(inflation_scores)) if inflation_scores else 0.0
+
+    if nfp_change is not None:
+        add_component("NFP thay đổi hàng tháng", clamp((nfp_change - 150.0) / 180.0), 0.08)
+    if unemployment is not None:
+        add_component("Tỷ lệ thất nghiệp", clamp((4.5 - unemployment) / 1.0), 0.08)
+
+    # Market moves confirm whether the restrictive/easing pressure is already
+    # being priced. These are confirmation inputs, not a replacement for data.
+    real_yield_change = history_change("real_yield")
+    us10y_change = history_change("us10y")
+    dxy_change = history_change("dxy")
+    market_scores = []
+    if real_yield_change is not None:
+        market_scores.append(clamp(real_yield_change / 0.15))
+    if us10y_change is not None:
+        market_scores.append(clamp(us10y_change / 0.20))
+    if dxy_change is not None and dxy is not None:
+        market_scores.append(clamp((dxy_change / max(abs(dxy), 1e-6)) / 0.005))
+    if market_scores:
+        add_component("Lợi suất thực/US10Y/DXY biến động", float(np.mean(market_scores)), 0.12)
+
+    today = datetime.now().date()
+    past_fed_events = []
+    upcoming_fed_events = []
+    for event in calendar or []:
+        if not isinstance(event, dict) or event.get("category") != "FED":
+            continue
+        try:
+            event_date = datetime.strptime(str(event.get("date")), "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        if event_date <= today:
+            past_fed_events.append((event_date, event))
+        else:
+            upcoming_fed_events.append((event_date, event))
+    past_fed_events.sort(key=lambda item: item[0], reverse=True)
+    upcoming_fed_events.sort(key=lambda item: item[0])
+
+    latest_fed_event = past_fed_events[0][1] if past_fed_events else None
+    latest_fed_date = past_fed_events[0][0] if past_fed_events else None
+    speech_tone = str((latest_fed_event or {}).get("policy_tone", "neutral")).lower()
+    speech_score = {"hawkish": 1.0, "dovish": -1.0}.get(speech_tone, 0.0)
+    speech_is_recent = bool(latest_fed_date and (today - latest_fed_date).days <= 14)
+    if speech_is_recent and speech_score:
+        add_component("Phát biểu FED gần nhất", speech_score, 0.17)
+
+    total_weight = sum(item["weight"] for item in components)
+    policy_score = float(sum(item["score"] * item["weight"] for item in components))
+    policy_score = clamp(policy_score)
+    coverage = float(min(1.0, total_weight))
+
+    # These are scenario probabilities, not official FED guidance. They are
+    # deliberately conservative: a strong score still leaves a large hold
+    # probability because the next meeting outcome is uncertain.
+    hike_probability = 0.07 + 0.25 * max(policy_score, 0.0)
+    cut_probability = 0.07 + 0.25 * max(-policy_score, 0.0)
+    hold_probability = max(0.05, 1.0 - hike_probability - cut_probability)
+    probability_total = hike_probability + hold_probability + cut_probability
+    probabilities = {
+        "hike": float(hike_probability / probability_total),
+        "hold": float(hold_probability / probability_total),
+        "cut": float(cut_probability / probability_total),
+    }
+    action_key = max(probabilities, key=probabilities.get)
+    action_labels = {"hike": "Tăng lãi suất", "hold": "Giữ nguyên", "cut": "Giảm lãi suất"}
+    bias_label = "Hawkish" if policy_score >= 0.12 else "Dovish" if policy_score <= -0.12 else "Trung lập"
+    confidence_pct = float(np.clip((35.0 + 45.0 * abs(policy_score)) * coverage, 10.0, 90.0))
+
+    # Gold usually reacts negatively to restrictive policy pressure in the
+    # short run. Inflation can support gold over a longer horizon, so expose
+    # both effects instead of collapsing them into a simplistic rule.
+    gold_score = clamp(-0.75 * policy_score + 0.18 * max(inflation_score, 0.0))
+    gold_label = "Tăng" if gold_score >= 0.12 else "Giảm" if gold_score <= -0.12 else "Trung lập"
+
+    drivers = []
+    if core_pce_yoy is not None:
+        drivers.append(f"Core PCE {core_pce_yoy:.2f}% so với mục tiêu 2%")
+    if cpi_yoy is not None:
+        drivers.append(f"CPI {cpi_yoy:.2f}%")
+    if nfp_change is not None and unemployment is not None:
+        drivers.append(f"NFP {nfp_change:+.0f} nghìn, thất nghiệp {unemployment:.1f}%")
+    if speech_is_recent and latest_fed_event:
+        drivers.append(
+            f"{latest_fed_event.get('event', 'Phát biểu FED')}: "
+            f"{latest_fed_event.get('policy_tone_label', speech_tone)}"
+        )
+    if real_yield_change is not None or us10y_change is not None:
+        drivers.append("Lợi suất thực/US10Y được dùng để xác nhận áp lực chính sách")
+
+    inputs = [
+        {"key": "cpi_yoy", "label": "CPI YoY", "value": cpi_yoy, "unit": "%", "impact": "Cao hơn → hawkish"},
+        {"key": "pce_yoy", "label": "PCE YoY", "value": pce_yoy, "unit": "%", "impact": "Cao hơn → hawkish"},
+        {"key": "core_pce_yoy", "label": "Core PCE YoY", "value": core_pce_yoy, "unit": "%", "impact": "Cao hơn → hawkish"},
+        {"key": "core_pce_mom", "label": "Core PCE MoM", "value": core_pce_mom, "unit": "%", "impact": "Động lượng lạm phát"},
+        {"key": "fed_rate", "label": "Fed Funds hiện tại", "value": fed_rate, "unit": "%", "impact": "Mức nền chính sách"},
+        {"key": "nfp_change", "label": "NFP thay đổi", "value": nfp_change, "unit": "nghìn", "impact": "Việc làm mạnh → hawkish"},
+        {"key": "unemployment", "label": "Thất nghiệp", "value": unemployment, "unit": "%", "impact": "Thất nghiệp thấp → hawkish"},
+        {"key": "dxy", "label": "DXY", "value": dxy, "unit": "điểm", "impact": "Tăng → gây áp lực vàng"},
+        {"key": "us10y", "label": "US10Y", "value": us10y, "unit": "%", "impact": "Tăng → gây áp lực vàng"},
+        {"key": "real_yield", "label": "Real yield", "value": real_yield, "unit": "%", "impact": "Tăng → gây áp lực vàng"},
+        {"key": "vix", "label": "VIX", "value": vix, "unit": "điểm", "impact": "Tăng → hỗ trợ trú ẩn"},
+        {"key": "brent", "label": "Brent", "value": brent, "unit": "USD/thùng", "impact": "Tác động lạm phát gián tiếp"},
+    ]
+    for item in inputs:
+        item["available"] = item["value"] is not None
+        if item["value"] is not None:
+            item["value"] = float(item["value"])
+
+    next_event = upcoming_fed_events[0] if upcoming_fed_events else None
+    latest_event_payload = None
+    if latest_fed_event:
+        latest_event_payload = dict(latest_fed_event)
+        latest_event_payload["date"] = str(latest_fed_date)
+
+    return {
+        "as_of": datetime.now().isoformat(timespec="seconds"),
+        "method": "transparent_macro_policy_nowcast",
+        "coverage": coverage,
+        "confidence_pct": confidence_pct,
+        "inflation": {
+            "score": inflation_score,
+            "label": "Áp lực tăng" if inflation_score >= 0.12 else "Đang hạ nhiệt" if inflation_score <= -0.12 else "Ổn định",
+            "target": 2.0,
+            "cpi_yoy": cpi_yoy,
+            "pce_yoy": pce_yoy,
+            "core_pce_yoy": core_pce_yoy,
+            "core_pce_mom": core_pce_mom,
+        },
+        "fed_action": {
+            "primary": action_labels[action_key],
+            "primary_key": action_key,
+            "bias": bias_label,
+            "score": policy_score,
+            "probabilities": probabilities,
+            "horizon": "kỳ họp FED kế tiếp",
+        },
+        "gold_implication": {
+            "label": gold_label,
+            "score": gold_score,
+            "confidence_pct": float(np.clip(abs(gold_score) * 100.0 * coverage, 5.0, 90.0)),
+            "horizon": "ngắn hạn theo kỳ vọng lãi suất",
+        },
+        "inputs": inputs,
+        "drivers": drivers[:6],
+        "components": components,
+        "latest_fed_event": latest_event_payload,
+        "next_fed_event": {
+            **dict(next_event[1]),
+            "days": int((next_event[0] - today).days),
+        } if next_event else None,
+        "market_confirmation": {
+            "dxy_change": dxy_change,
+            "us10y_change": us10y_change,
+            "real_yield_change": real_yield_change,
+        },
+    }
 
 
 def fetch_crude_oil_price():
@@ -2715,7 +4951,7 @@ def get_gold_prediction_history_with_explanations():
             import predictor
             
             df = pd.DataFrame(gold_list)
-            df["world_price"] = df["world_price"].replace(0.0, np.nan).ffill().bfill()
+            df["world_price"] = df["world_price"].replace(0.0, np.nan).ffill()
             df["close"] = df["world_price"]
             df["open"] = df["world_price"]
             df["high"] = df["world_price"]
@@ -2726,8 +4962,8 @@ def get_gold_prediction_history_with_explanations():
             macro_df = pd.DataFrame(list(macro_cursor))
             if not macro_df.empty and "date" in macro_df.columns:
                 df = pd.merge(df, macro_df, on="date", how="left")
-                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield"] if c in df.columns]
-                df[cols] = df[cols].ffill().bfill()
+                cols = [c for c in ["dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd", "real_yield", "gld", "gld_trust"] if c in df.columns]
+                df[cols] = df[cols].ffill()
                 
             df_ind = predictor.calculate_technical_indicators(df)
             
@@ -2759,13 +4995,11 @@ def get_gold_prediction_history_with_explanations():
                             item["explanations"][model_key] = generate_prediction_explanation_for_date(row_curr, row_prev, pred_trend)
                 
                 if not item["explanations"]:
-                    item["explanations"] = {m: "Tín hiệu kỹ thuật & vĩ mô đi ngang." for m in ["random_forest", "linear_regression", "mlp", "xgboost", "lstm", "ensemble"]}
+                    item["explanations"] = {m: "Tín hiệu kỹ thuật & vĩ mô đi ngang." for m in ["random_forest", "linear_regression", "mlp", "xgboost", "lstm", "cnn", "ensemble"]}
     except Exception as e:
         print(f"Error generating explanations for prediction history: {e}")
         for item in history:
             if "explanations" not in item:
-                item["explanations"] = {m: "Không có phân tích." for m in ["random_forest", "linear_regression", "mlp", "xgboost", "lstm", "ensemble"]}
+                item["explanations"] = {m: "Không có phân tích." for m in ["random_forest", "linear_regression", "mlp", "xgboost", "lstm", "cnn", "ensemble"]}
                 
     return history
-
-

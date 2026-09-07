@@ -1,0 +1,681 @@
+/*
+ * AI Gold & Vietlott — UI redesign experiment
+ *
+ * This file is intentionally scoped to .ui-redesign so the branch can be
+ * reverted without touching prediction, backtest, or roundtable behaviour.
+ */
+
+.ui-redesign {
+    --ui-bg: #080b14;
+    --ui-bg-soft: #0d1220;
+    --ui-surface: #111827;
+    --ui-surface-raised: #151e30;
+    --ui-surface-muted: #0b1220;
+    --ui-line: rgba(148, 163, 184, 0.16);
+    --ui-line-strong: rgba(148, 163, 184, 0.28);
+    --ui-text: #eef2ff;
+    --ui-text-soft: #a7b3c8;
+    --ui-text-muted: #71809b;
+    --ui-gold: #f4b740;
+    --ui-gold-soft: rgba(244, 183, 64, 0.12);
+    --ui-blue: #69a8ff;
+    --ui-blue-soft: rgba(105, 168, 255, 0.12);
+    --ui-red: #fb7185;
+    --ui-red-soft: rgba(251, 113, 133, 0.12);
+    --ui-green: #35d399;
+    --ui-radius: 14px;
+    --ui-radius-sm: 9px;
+    --ui-shadow: 0 18px 42px rgba(0, 0, 0, 0.25);
+    color: var(--ui-text);
+}
+
+/* The standalone Vietlott AI report is intentionally removed from navigation. */
+.ui-redesign #tab-vietlott-report,
+.ui-redesign #vietlott-subview-report {
+    display: none !important;
+}
+
+.ui-redesign,
+.ui-redesign body {
+    background: var(--ui-bg);
+}
+
+.ui-redesign::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    background:
+        linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.018) 1px, transparent 1px),
+        radial-gradient(circle at 82% 0%, rgba(105,168,255,0.13), transparent 28rem),
+        radial-gradient(circle at 4% 24%, rgba(244,183,64,0.08), transparent 24rem);
+    background-size: 44px 44px, 44px 44px, auto, auto;
+    mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+
+/* App chrome: compact, fixed hierarchy instead of a floating glass header. */
+.ui-redesign > header {
+    min-height: 76px;
+    padding: 0.85rem clamp(1rem, 3vw, 3rem);
+    background: rgba(8, 11, 20, 0.94) !important;
+    border-bottom: 1px solid var(--ui-line) !important;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.ui-redesign .logo {
+    gap: 0.8rem;
+}
+
+.ui-redesign .logo-icon-wrap {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: var(--ui-gold-soft) !important;
+    border: 1px solid rgba(244,183,64,0.38) !important;
+    box-shadow: none !important;
+    animation: none;
+}
+
+.ui-redesign .logo-icon-wrap i {
+    background: none;
+    -webkit-text-fill-color: var(--ui-gold);
+    color: var(--ui-gold);
+}
+
+.ui-redesign .logo-text h1 {
+    background: none;
+    -webkit-text-fill-color: var(--ui-text);
+    color: var(--ui-text);
+    font-size: 1rem;
+    letter-spacing: 0.02em;
+}
+
+.ui-redesign .logo-text .logo-sub {
+    color: var(--ui-text-muted);
+    letter-spacing: 0.12em;
+}
+
+.ui-redesign #header-nav-tabs {
+    margin-left: auto;
+    margin-right: auto;
+    background: var(--ui-surface-muted);
+    border: 1px solid var(--ui-line);
+    border-radius: 11px;
+    padding: 4px;
+}
+
+.ui-redesign #header-nav-tabs .tab-btn {
+    min-height: 38px;
+    padding: 0.5rem 1rem;
+    color: var(--ui-text-muted);
+    border-radius: 8px;
+}
+
+.ui-redesign #header-nav-tabs .tab-btn.active {
+    background: var(--ui-surface-raised);
+    color: var(--ui-text);
+    box-shadow: inset 0 0 0 1px var(--ui-line-strong), 0 4px 12px rgba(0,0,0,0.18);
+}
+
+.ui-redesign #header-nav-tabs .tab-btn:first-child.active {
+    color: var(--ui-gold);
+}
+
+.ui-redesign #header-nav-tabs .tab-btn:nth-child(3).active {
+    color: var(--ui-red);
+}
+
+.ui-redesign .header-status {
+    background: var(--ui-surface-muted) !important;
+    border-color: var(--ui-line) !important;
+    border-radius: 9px;
+}
+
+.ui-redesign .mobile-sidebar-toggle {
+    border: 1px solid var(--ui-line) !important;
+    background: var(--ui-surface-muted) !important;
+    border-radius: 9px;
+}
+
+/* Two-level workspace: navigation rail + active analysis canvas. */
+.ui-redesign .main-container {
+    max-width: 1760px;
+    grid-template-columns: 254px minmax(0, 1fr);
+    gap: 1.1rem;
+    padding: 1.15rem clamp(1rem, 3vw, 3rem) 3rem;
+}
+
+.ui-redesign .glass-panel {
+    background: var(--ui-surface) !important;
+    border: 1px solid var(--ui-line) !important;
+    border-radius: var(--ui-radius);
+    box-shadow: var(--ui-shadow);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.ui-redesign .glass-panel:hover {
+    border-color: var(--ui-line-strong) !important;
+}
+
+.ui-redesign #left-sidebar {
+    padding: 1rem !important;
+    background: rgba(13, 18, 32, 0.92) !important;
+}
+
+@media (min-width: 1100px) {
+    .ui-redesign #left-sidebar {
+        top: 92px;
+        max-height: calc(100vh - 112px);
+    }
+}
+
+.ui-redesign #detail-card-panel {
+    padding: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+
+.ui-redesign #detail-card-panel > .detail-panel {
+    gap: 1rem;
+}
+
+.ui-redesign .panel-header {
+    margin-bottom: 0.85rem;
+    padding-bottom: 0.8rem;
+    border-color: var(--ui-line);
+}
+
+.ui-redesign .panel-header h2 {
+    color: var(--ui-text);
+    font-size: 0.86rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.ui-redesign #sidebar-panel-header i {
+    color: var(--ui-gold) !important;
+}
+
+.ui-redesign .gold-nav-item,
+.ui-redesign .vietlott-nav-item {
+    min-height: 40px;
+    padding: 0.58rem 0.7rem;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--ui-radius-sm);
+    color: var(--ui-text-soft);
+}
+
+.ui-redesign .gold-nav-item:hover,
+.ui-redesign .gold-nav-item:focus-visible {
+    background: var(--ui-gold-soft);
+    border-color: rgba(244,183,64,0.28);
+    color: var(--ui-gold);
+    transform: none;
+}
+
+.ui-redesign .vietlott-nav-item:hover,
+.ui-redesign .vietlott-nav-item.active,
+.ui-redesign .vietlott-nav-item:focus-visible {
+    background: var(--ui-red-soft);
+    border-color: rgba(251,113,133,0.28);
+    color: var(--ui-red);
+    transform: none;
+}
+
+.ui-redesign .sidebar-section-title {
+    letter-spacing: 0.015em;
+}
+
+/* Active dashboard header becomes a readable title strip. */
+.ui-redesign .detail-ticker-header {
+    min-height: 104px;
+    padding: 1.25rem 1.4rem;
+    align-items: center;
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-line);
+    border-radius: var(--ui-radius);
+    box-shadow: var(--ui-shadow);
+}
+
+.ui-redesign .detail-title-block h3 {
+    background: none;
+    -webkit-text-fill-color: var(--ui-text);
+    color: var(--ui-text);
+    font-size: clamp(1.35rem, 2.1vw, 2rem);
+}
+
+.ui-redesign .detail-current-price {
+    color: var(--ui-gold);
+    font-size: clamp(1.4rem, 2.4vw, 2rem);
+}
+
+.ui-redesign .detail-title-block .source-tag,
+.ui-redesign .source-tag {
+    background: var(--ui-surface-muted);
+    border-color: var(--ui-line);
+}
+
+.ui-redesign .tab-group {
+    background: var(--ui-surface-muted);
+    border-color: var(--ui-line);
+}
+
+.ui-redesign .tab-btn.active {
+    background: var(--ui-blue);
+    color: #07111f;
+    box-shadow: none;
+}
+
+/* Cards and metric strips share one visual language. */
+.ui-redesign .forecast-section,
+.ui-redesign .stat-card,
+.ui-redesign .advice-card,
+.ui-redesign .confidence-card,
+.ui-redesign .gold-activity-card,
+.ui-redesign #gold-backtest-section,
+.ui-redesign #vietlott-backtest-history-section,
+.ui-redesign #vietlott-heatmap-section {
+    background: var(--ui-surface) !important;
+    border: 1px solid var(--ui-line) !important;
+    border-radius: var(--ui-radius-sm) !important;
+    box-shadow: none;
+}
+
+.ui-redesign .stats-grid {
+    gap: 0.7rem;
+}
+
+.ui-redesign .stat-card {
+    padding: 1rem;
+}
+
+.ui-redesign .stat-card .value {
+    color: var(--ui-text);
+    font-size: 1.15rem;
+}
+
+.ui-redesign .forecast-section {
+    padding: 1.05rem;
+}
+
+.ui-redesign .forecast-title {
+    color: var(--ui-text);
+    font-size: 0.9rem;
+    padding-bottom: 0.7rem;
+    border-bottom: 1px solid var(--ui-line);
+}
+
+.ui-redesign .forecast-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.7rem;
+}
+
+.ui-redesign .forecast-day {
+    min-height: 138px;
+    background: var(--ui-surface-raised);
+    border-color: var(--ui-line);
+    border-radius: var(--ui-radius-sm);
+}
+
+.ui-redesign .forecast-day:hover {
+    border-color: var(--ui-line-strong);
+    transform: translateY(-2px);
+}
+
+/* Roundtable is still a roundtable concept, but the evidence is presented as
+   a board: chair decision first, model statements below, no decorative oval. */
+.ui-redesign .gold-roundtable-conference {
+    padding: 1.25rem;
+    background: var(--ui-surface) !important;
+    border: 1px solid rgba(244,183,64,0.28) !important;
+    border-radius: var(--ui-radius);
+    box-shadow: var(--ui-shadow);
+}
+
+.ui-redesign .gold-roundtable-heading {
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--ui-line);
+}
+
+.ui-redesign .gold-roundtable-kicker,
+.ui-redesign .gold-roundtable-chair-label {
+    color: var(--ui-gold);
+}
+
+.ui-redesign .gold-roundtable-heading h3 {
+    font-size: 1.1rem;
+}
+
+.ui-redesign .gold-roundtable-fed-brief {
+    display: grid;
+    grid-template-columns: minmax(190px, 0.85fr) minmax(240px, 1.15fr) minmax(220px, 1fr);
+    gap: 0.65rem;
+    margin-top: 0.9rem;
+    padding: 0.8rem;
+    border: 1px solid rgba(96,165,250,0.28);
+    border-radius: var(--ui-radius-sm);
+    background: linear-gradient(135deg, rgba(96,165,250,0.1), rgba(244,183,64,0.05));
+}
+
+.ui-redesign .gold-roundtable-fed-brief .fed-brief-label {
+    color: #93c5fd;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.ui-redesign .gold-roundtable-fed-brief .fed-brief-value {
+    margin-top: 0.22rem;
+    color: var(--ui-text);
+    font-size: 0.96rem;
+    font-weight: 800;
+}
+
+.ui-redesign .gold-roundtable-fed-brief .fed-brief-meta,
+.ui-redesign .gold-roundtable-fed-brief .fed-brief-reason {
+    margin-top: 0.18rem;
+    color: var(--ui-muted);
+    font-size: 0.72rem;
+    line-height: 1.45;
+}
+
+.ui-redesign .gold-roundtable-fed-brief .fed-brief-reason {
+    color: var(--ui-text-secondary);
+}
+
+.ui-redesign .gold-roundtable-board,
+.ui-redesign .vietlott-roundtable .gold-roundtable-board {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+    max-width: none;
+    min-height: 0 !important;
+    margin: 1rem 0 0;
+}
+
+.ui-redesign .gold-roundtable-table {
+    display: none;
+}
+
+.ui-redesign .gold-roundtable-member,
+.ui-redesign .gold-roundtable-chair,
+.ui-redesign .vietlott-roundtable .gold-roundtable-member,
+.ui-redesign .vietlott-roundtable .gold-roundtable-chair {
+    position: relative;
+    inset: auto !important;
+    width: auto !important;
+    transform: none !important;
+    border-radius: var(--ui-radius-sm);
+    background: var(--ui-surface-raised) !important;
+    border-color: var(--ui-line) !important;
+    box-shadow: none;
+}
+
+.ui-redesign .gold-roundtable-chair {
+    grid-column: 1 / -1;
+    order: -1;
+    padding: 1rem 1.1rem;
+    text-align: left;
+    background: linear-gradient(135deg, rgba(244,183,64,0.13), var(--ui-surface-raised) 45%) !important;
+    border-color: rgba(244,183,64,0.42) !important;
+}
+
+.ui-redesign .gold-roundtable-chair h4 {
+    font-size: 1rem;
+}
+
+.ui-redesign .gold-roundtable-chair-decision {
+    font-size: 1.25rem;
+}
+
+.ui-redesign .gold-roundtable-member {
+    padding: 0.8rem;
+}
+
+.ui-redesign .gold-roundtable-member:hover,
+.ui-redesign .gold-roundtable-member.active {
+    border-color: rgba(105,168,255,0.58) !important;
+    box-shadow: 0 8px 22px rgba(22, 87, 171, 0.16);
+}
+
+.ui-redesign .gold-roundtable-arguments {
+    background: var(--ui-surface-muted);
+    border: 1px solid var(--ui-line);
+}
+
+.ui-redesign .gold-roundtable-rule {
+    margin-top: 1rem;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--ui-line);
+}
+
+.ui-redesign .vietlott-roundtable {
+    background: var(--ui-surface) !important;
+    border-color: rgba(251,113,133,0.3) !important;
+}
+
+.ui-redesign .vietlott-roundtable .gold-roundtable-chair {
+    background: linear-gradient(135deg, rgba(251,113,133,0.13), var(--ui-surface-raised) 45%) !important;
+    border-color: rgba(251,113,133,0.42) !important;
+}
+
+.ui-redesign .vietlott-roundtable .gold-roundtable-kicker,
+.ui-redesign .vietlott-roundtable .gold-roundtable-chair-label {
+    color: var(--ui-red);
+}
+
+/* Data tables: calmer rows, denser headers, horizontal scroll on small screens. */
+.ui-redesign .table-container,
+.ui-redesign .table-wrapper {
+    border: 1px solid var(--ui-line);
+    border-radius: var(--ui-radius-sm);
+    overflow: auto;
+    background: var(--ui-surface-muted);
+}
+
+.ui-redesign table {
+    border-collapse: separate;
+    border-spacing: 0;
+    min-width: 680px;
+}
+
+.ui-redesign table thead,
+.ui-redesign .table-container thead {
+    background: #0b1425 !important;
+}
+
+.ui-redesign table th {
+    padding: 0.7rem 0.8rem;
+    color: var(--ui-text-muted);
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.ui-redesign table td {
+    padding: 0.75rem 0.8rem;
+    border-top: 1px solid rgba(148,163,184,0.08);
+    color: var(--ui-text-soft);
+    font-size: 0.75rem;
+}
+
+.ui-redesign table tbody tr:hover {
+    background: rgba(105,168,255,0.06) !important;
+}
+
+/* Controls and status surfaces. */
+.ui-redesign input,
+.ui-redesign select,
+.ui-redesign textarea {
+    background: var(--ui-surface-muted) !important;
+    border-color: var(--ui-line) !important;
+    border-radius: 8px !important;
+}
+
+.ui-redesign .btn-refresh,
+.ui-redesign .btn,
+.ui-redesign button:not(.tab-btn):not(.gold-roundtable-member):not(.vietlott-nav-item):not(.gold-nav-item) {
+    transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.ui-redesign .btn-refresh:hover,
+.ui-redesign .btn:hover {
+    transform: translateY(-1px);
+}
+
+.ui-redesign .loading-overlay {
+    background: rgba(8,11,20,0.82) !important;
+    backdrop-filter: blur(4px);
+}
+
+/* Make long evidence/activity areas feel like a timeline rather than a wall. */
+.ui-redesign #background-activity-section,
+.ui-redesign #gold-calendar-section,
+.ui-redesign #gold-backtest-section,
+.ui-redesign #vietlott-backtest-history-section {
+    scroll-margin-top: 96px;
+}
+
+.ui-redesign #background-activity-section .panel-header,
+.ui-redesign #vietlott-backtest-history-section .panel-header,
+.ui-redesign #gold-backtest-section .panel-header {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: var(--ui-surface);
+}
+
+@media (max-width: 1200px) {
+    .ui-redesign .main-container {
+        grid-template-columns: 226px minmax(0, 1fr);
+    }
+
+    .ui-redesign .forecast-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 950px) {
+    .ui-redesign > header {
+        min-height: auto;
+        padding: 0.8rem 1rem;
+    }
+
+    .ui-redesign #header-nav-tabs {
+        order: 3;
+        width: 100%;
+        margin: 0;
+        overflow-x: auto;
+        justify-content: flex-start;
+    }
+
+    .ui-redesign .main-container {
+        grid-template-columns: 1fr;
+    }
+
+    .ui-redesign #left-sidebar {
+        position: static;
+        max-height: none;
+    }
+
+    .ui-redesign .gold-roundtable-board,
+    .ui-redesign .vietlott-roundtable .gold-roundtable-board {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 640px) {
+    .ui-redesign .main-container {
+        padding: 0.7rem 0.65rem 2rem;
+    }
+
+    .ui-redesign .detail-ticker-header,
+    .ui-redesign .gold-roundtable-conference {
+        padding: 0.9rem;
+    }
+
+    .ui-redesign .forecast-grid,
+    .ui-redesign .gold-roundtable-board,
+    .ui-redesign .vietlott-roundtable .gold-roundtable-board {
+        grid-template-columns: 1fr;
+    }
+
+    .ui-redesign .gold-roundtable-fed-brief {
+        grid-template-columns: 1fr;
+    }
+
+    .ui-redesign .gold-roundtable-chair {
+        grid-column: auto;
+    }
+
+    .ui-redesign .header-status {
+        display: none;
+    }
+}
+
+/*
+ * Structural experiment: the analysis canvas is primary. The navigation and
+ * live context move to a right-hand rail, which makes the page read like a
+ * research workstation instead of the old left-sidebar admin layout.
+ */
+@media (min-width: 1100px) {
+    .ui-redesign .main-container {
+        grid-template-columns: minmax(0, 1fr) 276px;
+        gap: 1.25rem;
+        align-items: start;
+    }
+
+    .ui-redesign #detail-card-panel {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .ui-redesign #left-sidebar {
+        grid-column: 2;
+        grid-row: 1;
+        position: sticky;
+        top: 92px;
+        max-height: calc(100vh - 112px);
+        overflow-y: auto;
+    }
+
+    .ui-redesign #left-sidebar .panel-header {
+        position: sticky;
+        top: -1rem;
+        z-index: 4;
+        margin: -1rem -1rem 0.75rem;
+        padding: 1rem;
+        background: var(--ui-surface);
+    }
+}
+
+@media (max-width: 1099px) {
+    .ui-redesign .main-container {
+        grid-template-columns: 1fr;
+    }
+
+    .ui-redesign #detail-card-panel,
+    .ui-redesign #left-sidebar {
+        grid-column: auto;
+        grid-row: auto;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ui-redesign *,
+    .ui-redesign *::before,
+    .ui-redesign *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+    }
+}

@@ -575,58 +575,6 @@
         .text-flat { color: var(--text-muted); }
 
         /* ====================================================
-           WATCHLIST ACTION BUTTONS
-        ==================================================== */
-        .btn-icon {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 28px;
-            height: 28px;
-            border-radius: 6px;
-            font-size: 0.72rem;
-            transition: all var(--transition-fast);
-            color: var(--text-muted);
-        }
-
-        .btn-icon-add:hover {
-            background: rgba(16,185,129,0.15);
-            color: var(--color-buy);
-        }
-
-        .btn-icon-remove:hover {
-            background: rgba(239,68,68,0.12);
-            color: var(--color-sell);
-        }
-
-        /* ====================================================
-           SCORE CHIP (mini in table)
-        ==================================================== */
-        .score-chip {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.78rem;
-            font-weight: 700;
-            padding: 0.2rem 0.5rem;
-            border-radius: 6px;
-            display: inline-block;
-        }
-
-        .score-chip.positive {
-            background: rgba(16,185,129,0.12);
-            color: var(--color-buy);
-        }
-
-        .score-chip.negative {
-            background: rgba(239,68,68,0.12);
-            color: var(--color-sell);
-        }
-
-        .score-chip.neutral {
-            background: rgba(245,158,11,0.12);
-            color: var(--color-hold);
-        }
-
-        /* ====================================================
            SKELETON LOADER
         ==================================================== */
         .skeleton {
@@ -1846,52 +1794,6 @@
             border-color: rgba(251, 191, 36, 0.35) !important;
         }
 
-        /* Stock Nav Menu */
-        .stock-nav-menu {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 0.35rem;
-            margin-bottom: 0.4rem;
-        }
-        .stock-nav-item {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.4rem 0.55rem;
-            background: rgba(255, 255, 255, 0.015);
-            border: 1px solid rgba(255, 255, 255, 0.04);
-            border-radius: 6px;
-            color: var(--text-secondary);
-            font-size: 0.7rem;
-            text-align: left;
-            cursor: pointer;
-            transition: all 0.2s ease-in-out;
-            width: 100%;
-        }
-        .stock-nav-item:hover {
-            background: rgba(16, 185, 129, 0.05);
-            border-color: rgba(16, 185, 129, 0.2);
-            color: #34d399;
-            transform: translateY(-1px);
-        }
-        .stock-nav-item i {
-            color: #34d399;
-            width: 12px;
-            text-align: center;
-            font-size: 0.72rem;
-        }
-        
-        /* Stock highlight target section pulse animation */
-        @keyframes stock-section-pulse {
-            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
-            50% { box-shadow: 0 0 20px 4px rgba(16, 185, 129, 0.2); }
-            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
-        }
-        .stock-section-highlighted {
-            animation: stock-section-pulse 1.2s ease-out;
-            border-color: rgba(16, 185, 129, 0.35) !important;
-        }
-
         /* Topbar navigation tab styles */
         #header-nav-tabs {
             margin: 0 auto;
@@ -1975,28 +1877,6 @@
         .vietlott-ball.power-special {
             background: radial-gradient(circle at 30% 30%, #38bdf8 0%, #0284c7 50%, #075985 100%);
         }
-        .vietlott-ball.keno-ball {
-            background: radial-gradient(circle at 30% 30%, #34d399 0%, #059669 50%, #064e3b 100%);
-            width: 1.85rem;
-            height: 1.85rem;
-            font-size: 0.8rem;
-        }
-        .vietlott-ball.bingo-ball {
-            background: radial-gradient(circle at 30% 30%, #fbbf24 0%, #d97706 50%, #78350f 100%);
-            width: 2.4rem;
-            height: 2.4rem;
-            font-size: 1rem;
-            border-radius: 8px; /* Cube/Dice look */
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.35), inset 0 2px 4px rgba(255, 255, 255, 0.4), inset 0 -2px 4px rgba(0, 0, 0, 0.4);
-        }
-        .vietlott-ball.max3d-ball {
-            background: radial-gradient(circle at 30% 30%, #c084fc 0%, #9333ea 50%, #581c87 100%);
-            border-radius: 6px;
-            width: 2.4rem;
-            height: 2rem;
-            font-size: 0.95rem;
-        }
-
         /* 3D Glowing Forecast Balls */
         .vietlott-ball.forecast-glow {
             box-shadow: 0 0 15px rgba(244, 63, 94, 0.65), inset 0 2px 4px rgba(255, 255, 255, 0.5), inset 0 -2px 4px rgba(0, 0, 0, 0.4);
@@ -2006,31 +1886,6 @@
             0% { transform: scale(1); box-shadow: 0 0 12px rgba(244, 63, 94, 0.5); }
             100% { transform: scale(1.06); box-shadow: 0 0 24px rgba(244, 63, 94, 0.9); }
         }
-        .vietlott-ball.keno-ball.forecast-glow {
-            box-shadow: 0 0 15px rgba(52, 211, 153, 0.65), inset 0 2px 4px rgba(255, 255, 255, 0.5), inset 0 -2px 4px rgba(0, 0, 0, 0.4);
-            animation: keno-ball-pulse 2s infinite alternate;
-        }
-        @keyframes keno-ball-pulse {
-            0% { transform: scale(1); box-shadow: 0 0 12px rgba(52, 211, 153, 0.5); }
-            100% { transform: scale(1.06); box-shadow: 0 0 24px rgba(52, 211, 153, 0.9); }
-        }
-        .vietlott-ball.bingo-ball.forecast-glow {
-            box-shadow: 0 0 15px rgba(251, 191, 36, 0.65), inset 0 2px 4px rgba(255, 255, 255, 0.5), inset 0 -2px 4px rgba(0, 0, 0, 0.4);
-            animation: bingo-ball-pulse 2s infinite alternate;
-        }
-        @keyframes bingo-ball-pulse {
-            0% { transform: scale(1); box-shadow: 0 0 12px rgba(251, 191, 36, 0.5); }
-            100% { transform: scale(1.06); box-shadow: 0 0 24px rgba(251, 191, 36, 0.9); }
-        }
-        .vietlott-ball.max3d-ball.forecast-glow {
-            box-shadow: 0 0 15px rgba(192, 132, 252, 0.65), inset 0 2px 4px rgba(255, 255, 255, 0.5), inset 0 -2px 4px rgba(0, 0, 0, 0.4);
-            animation: max3d-ball-pulse 2s infinite alternate;
-        }
-        @keyframes max3d-ball-pulse {
-            0% { transform: scale(1); box-shadow: 0 0 12px rgba(192, 132, 252, 0.5); }
-            100% { transform: scale(1.06); box-shadow: 0 0 24px rgba(192, 132, 252, 0.9); }
-        }
-
         /* Heatmap styling */
         .heatmap-grid {
             display: grid;

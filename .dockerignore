@@ -26,3 +26,16 @@ Dockerfile
 
 # App outputs or developer scratch files
 scratch/
+
+# Mobile client is not needed by the FastAPI backend and contains large build artifacts.
+gold_tracker/
+
+# Local packaged artifacts and OS metadata
+static/app-release.apk
+.DS_Store
+
+# Nested repository metadata and crawler documentation are not needed at runtime.
+vietlott-data-crawler/.git/
+vietlott-data-crawler/docs/
+vietlott-data-crawler/nb/
+vietlott-data-crawler/.idea/
