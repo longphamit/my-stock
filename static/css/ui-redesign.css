@@ -584,7 +584,10 @@
     }
 
     .ui-redesign #left-sidebar {
-        position: static;
+        /* Keep the mobile navigation as an off-canvas drawer.  Setting this
+           to static leaves the hidden 100dvh drawer in the document flow and
+           creates a large blank area before the analysis canvas. */
+        position: fixed;
         max-height: none;
     }
 
