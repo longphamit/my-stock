@@ -1524,6 +1524,26 @@
             line-height: 1.35;
         }
 
+        .gold-roundtable-codex-retry {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            margin-top: 0.55rem;
+            border: 1px solid rgba(105,168,255,0.4);
+            border-radius: 6px;
+            padding: 0.35rem 0.6rem;
+            background: rgba(105,168,255,0.1);
+            color: #93c5fd;
+            font-size: 0.62rem;
+            font-weight: 800;
+            cursor: pointer;
+        }
+
+        .gold-roundtable-codex-retry:hover {
+            background: rgba(105,168,255,0.18);
+            border-color: rgba(105,168,255,0.7);
+        }
+
         .gold-roundtable-chair-reason {
             color: var(--text-secondary);
             font-size: 0.62rem;
@@ -5426,6 +5446,88 @@
             throw new Error('Phân tích AI quá thời gian chờ');
         }
 
+        async function waitForCodexRetryStatus(url, onUpdate) {
+            for (let attempt = 0; attempt < 180; attempt += 1) {
+                const response = await fetch(`${url}?_ts=${Date.now()}`);
+                const state = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(state.detail || `HTTP ${response.status}`);
+                }
+                if (typeof onUpdate === 'function') onUpdate(state);
+                if (!['queued', 'running'].includes(state.status)) return state;
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            throw new Error('Gửi lại Codex quá thời gian chờ; hãy mở lại sau để xem trạng thái.');
+        }
+
+        async function retryGoldCodex() {
+            const button = document.getElementById('gold-codex-retry-btn');
+            if (button?.disabled) return;
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang gửi lại Codex...';
+                button.style.opacity = '0.65';
+            }
+            try {
+                const response = await fetch('/api/gold/codex/retry', { method: 'POST' });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+                const state = await waitForCodexRetryStatus('/api/gold/codex/retry-status');
+                if (state.status !== 'completed') {
+                    throw new Error(state.error || state.stage || 'Codex chưa hoàn tất');
+                }
+                const predictionResponse = await fetch(`/api/gold/predictions?_ts=${Date.now()}`);
+                if (!predictionResponse.ok) throw new Error(`Không tải được kết luận Codex (HTTP ${predictionResponse.status})`);
+                const predictions = await predictionResponse.json();
+                goldData.predictions = predictions;
+                goldData.latest_adjustments = predictions.latest_adjustments || {};
+                goldData.latest_adjustment = goldData.latest_adjustments[activeGoldModel] || null;
+                renderGoldDashboard();
+                showToast('Đã gửi lại biên bản hội nghị sang Codex thành công.', 'success');
+            } catch (error) {
+                console.error('Gold Codex retry failed:', error);
+                showToast(`Không thể gửi lại Codex: ${error.message}`, 'error');
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Đẩy lại sang Codex';
+                    button.style.opacity = '1';
+                }
+            }
+        }
+
+        async function retryVietlottCodex() {
+            const gameId = activeVietlottGame;
+            const button = document.getElementById('vietlott-codex-retry-btn');
+            if (button?.disabled) return;
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang gửi lại Codex...';
+                button.style.opacity = '0.65';
+            }
+            try {
+                const response = await fetch(`/api/vietlott/${encodeURIComponent(gameId)}/codex/retry`, { method: 'POST' });
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+                const state = await waitForCodexRetryStatus(`/api/vietlott/${encodeURIComponent(gameId)}/codex/retry-status`);
+                if (state.status !== 'completed') {
+                    throw new Error(state.error || state.stage || 'Codex chưa hoàn tất');
+                }
+                await fetchVietlottData(gameId);
+                switchVietlottSubTab('forecast');
+                showToast('Đã gửi lại biên bản Vietlott sang Codex thành công.', 'success');
+            } catch (error) {
+                console.error('Vietlott Codex retry failed:', error);
+                showToast(`Không thể gửi lại Codex: ${error.message}`, 'error');
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Đẩy lại sang Codex';
+                    button.style.opacity = '1';
+                }
+            }
+        }
+
         async function loadGoldPredictions() {
             if (isFetchingGoldPredictions || !goldData) return;
             isFetchingGoldPredictions = true;
@@ -6101,6 +6203,9 @@
             const advisorWarning = !isChatGPTDecision && advisor.message
                 ? `<div class="gold-roundtable-advisor-warning"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeBackgroundActivityHtml(advisor.message)}</div>`
                 : '';
+            const advisorRetryButton = advisor.status !== 'success' && pred?.advisor_input_data
+                ? `<button type="button" id="gold-codex-retry-btn" class="gold-roundtable-codex-retry" onclick="retryGoldCodex()"><i class="fa-solid fa-paper-plane"></i> Đẩy lại sang Codex</button>`
+                : '';
             board.innerHTML = `
                 <div class="gold-roundtable-table" aria-hidden="true"></div>
                 ${(meeting.members || []).map((member, seat) => {
@@ -6126,6 +6231,7 @@
                     <div class="gold-roundtable-ensemble-reference">Mốc Ensemble: $${money(decision.price)} · ${finalPct >= 0 ? '+' : ''}${finalPct.toFixed(2)}% · ${escapeBackgroundActivityHtml(decision.label || '')}</div>
                     <div class="gold-roundtable-chair-reason">${escapeBackgroundActivityHtml(finalReason)}<br>Độ tin cậy: <strong>${escapeBackgroundActivityHtml(confidenceDetail)}</strong></div>
                     ${advisorWarning}
+                    ${advisorRetryButton}
                     <button type="button" class="gold-roundtable-arguments-toggle" aria-expanded="false"><i class="fa-solid fa-scale-balanced"></i> Xem lập luận quyết định cuối</button>
                     <div class="gold-roundtable-arguments"><ul>${argumentsList.map(argument => `<li>${escapeBackgroundActivityHtml(argument)}</li>`).join('')}</ul></div>
                 </div>`;
@@ -8806,6 +8912,7 @@
                     }).join('')}
                     <div class="gold-roundtable-chair-reason" style="margin-top:0.5rem;">${escapeBackgroundActivityHtml(isChatGPT ? advisor.conclusion : fallbackDecision.conclusion || '')}<br>Độ tin cậy: <strong>${escapeBackgroundActivityHtml(confidenceLabels[confidence] || confidence || 'Thấp')}</strong></div>
                     ${!isChatGPT && advisor.message ? `<div class="gold-roundtable-advisor-warning"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeBackgroundActivityHtml(advisor.message)}</div>` : ''}
+                    ${!isChatGPT ? '<button type="button" id="vietlott-codex-retry-btn" class="gold-roundtable-codex-retry" onclick="retryVietlottCodex()"><i class="fa-solid fa-paper-plane"></i> Đẩy lại sang Codex</button>' : ''}
                     <button type="button" class="gold-roundtable-arguments-toggle" aria-expanded="false"><i class="fa-solid fa-scale-balanced"></i> Xem lập luận quyết định cuối</button>
                     <div class="gold-roundtable-arguments"><ul>${argumentsList.map(argument => `<li>${escapeBackgroundActivityHtml(argument)}</li>`).join('')}</ul></div>
                 </div>`;

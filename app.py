@@ -26,6 +26,7 @@ CALENDAR_RESULTS_UPDATE_HOUR = 3
 CALENDAR_RESULTS_UPDATE_MINUTE = 0
 BACKGROUND_ACTIVITY_COLLECTION = "background_activity_history"
 GOLD_BACKTEST_RESULT_COLLECTION = "gold_backtest_results"
+GOLD_CODEX_SNAPSHOT_COLLECTION = "gold_codex_retry_snapshots"
 
 # Initialize MongoDB database
 crawler.init_db()
@@ -120,6 +121,9 @@ gold_prediction_job_lock = threading.Lock()
 gold_prediction_result_lock = threading.Lock()
 gold_prediction_task = None
 gold_prediction_result = None
+codex_retry_status = {}
+codex_retry_workers = {}
+codex_retry_lock = threading.RLock()
 gold_backtest_jobs = {}
 gold_backtest_jobs_lock = threading.RLock()
 GOLD_BACKTEST_JOB_RETENTION_SECONDS = 3600
@@ -291,6 +295,219 @@ def _set_gold_prediction_status(status=None, stage=None, progress=None, error=No
 def _get_gold_prediction_status():
     with gold_prediction_status_lock:
         return dict(gold_prediction_status)
+
+
+def _persist_gold_codex_retry_snapshot(result):
+    """Keep the complete latest roundtable so Codex can be retried later.
+
+    The retry action must not retrain the numeric models.  Persisting the
+    already-built report also means a transient Codex outage does not discard
+    the meeting packet when the web process is restarted.
+    """
+    if not isinstance(result, dict) or not result.get("roundtable"):
+        return
+    try:
+        payload = jsonable_encoder(result)
+        crawler.db[GOLD_CODEX_SNAPSHOT_COLLECTION].replace_one(
+            {"_id": "latest"},
+            {
+                "_id": "latest",
+                "payload": payload,
+                "saved_at": datetime.now(VIETNAM_TIMEZONE).isoformat(timespec="seconds"),
+            },
+            upsert=True,
+        )
+    except Exception as snapshot_error:
+        # Codex retry is an auxiliary capability; never turn a valid forecast
+        # into a failed prediction because Mongo cannot write its snapshot.
+        print(f"Gold Codex retry snapshot failed: {snapshot_error}")
+
+
+def _get_gold_codex_retry_snapshot():
+    with gold_prediction_result_lock:
+        current = gold_prediction_result
+    if isinstance(current, dict) and current.get("roundtable") and current.get("advisor_input_data"):
+        return current
+    try:
+        saved = crawler.db[GOLD_CODEX_SNAPSHOT_COLLECTION].find_one(
+            {"_id": "latest"},
+            {"_id": 0, "payload": 1},
+        ) or {}
+        payload = saved.get("payload")
+        return payload if isinstance(payload, dict) else None
+    except Exception as snapshot_error:
+        print(f"Gold Codex retry snapshot lookup failed: {snapshot_error}")
+        return None
+
+
+def _codex_retry_key(kind, product=None):
+    return "gold" if kind == "gold" else f"vietlott:{product}"
+
+
+def _get_codex_retry_status(key):
+    with codex_retry_lock:
+        return dict(codex_retry_status.get(key) or {
+            "scope": key,
+            "status": "idle",
+            "stage": "Chưa gửi lại yêu cầu Codex",
+            "progress": 0,
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+        })
+
+
+def _set_codex_retry_status(key, status=None, stage=None, progress=None, error=None):
+    with codex_retry_lock:
+        current = codex_retry_status.setdefault(key, {
+            "scope": key,
+            "status": "idle",
+            "stage": "Chưa gửi lại yêu cầu Codex",
+            "progress": 0,
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+        })
+        current["scope"] = key
+        if status is not None:
+            current["status"] = status
+        if stage is not None:
+            current["stage"] = stage
+        if progress is not None:
+            current["progress"] = max(0, min(100, int(progress)))
+        if error is not None:
+            current["error"] = str(error)[:500]
+        elif status in {"queued", "running"}:
+            current["error"] = None
+        if status in {"queued", "running"} and not current.get("started_at"):
+            current["started_at"] = datetime.now(VIETNAM_TIMEZONE).isoformat(timespec="seconds")
+        if status in {"completed", "error"}:
+            current["finished_at"] = datetime.now(VIETNAM_TIMEZONE).isoformat(timespec="seconds")
+        snapshot = dict(current)
+    return snapshot
+
+
+def _run_codex_retry(kind, product=None):
+    """Retry only the Codex chair using the existing roundtable report."""
+    key = _codex_retry_key(kind, product)
+    _set_codex_retry_status(
+        key,
+        status="running",
+        stage="Đang gửi lại biên bản hội nghị sang Codex",
+        progress=10,
+    )
+    try:
+        from openai_advisor import (
+            generate_gold_roundtable_advice,
+            generate_vietlott_roundtable_advice,
+        )
+
+        if kind == "gold":
+            analysis = _get_gold_codex_retry_snapshot()
+            if not analysis:
+                raise RuntimeError("Chưa có biên bản hội nghị vàng để gửi lại Codex.")
+            advisor = generate_gold_roundtable_advice(analysis)
+            analysis["chatgpt_advisor"] = advisor
+            if isinstance(analysis.get("roundtable"), dict):
+                analysis["roundtable"]["chatgpt_advisor"] = advisor
+            with gold_prediction_result_lock:
+                global gold_prediction_result
+                gold_prediction_result = analysis
+            _persist_gold_codex_retry_snapshot(analysis)
+            if advisor.get("status") != "success":
+                raise RuntimeError(advisor.get("message") or "Codex chưa trả về kết luận.")
+        else:
+            cached = vietlott.db.vietlott_cache.find_one({"_id": product})
+            forecast = (cached or {}).get("forecast") or {}
+            if not cached or not forecast:
+                raise RuntimeError(f"Chưa có forecast {product} để gửi lại Codex.")
+            roundtable, advisor_input = vietlott.build_vietlott_roundtable(
+                product,
+                forecast,
+                cached.get("recent_draws") or [],
+                cached.get("stats") or {},
+            )
+            advisor = generate_vietlott_roundtable_advice(roundtable, advisor_input)
+            roundtable["chatgpt_advisor"] = advisor
+            roundtable["advisor_input_summary"] = {
+                "data_groups": advisor_input.get("data_groups") or [],
+                "recent_draw_count": len(advisor_input.get("recent_draws") or []),
+                "number_stat_count": len(advisor_input.get("number_statistics") or []),
+                "candidate_feature_count": len(advisor_input.get("candidate_number_features") or {}),
+                "backtest_models": list((advisor_input.get("backtest_summary") or {}).keys()),
+            }
+            forecast["roundtable"] = roundtable
+            forecast["chatgpt_advisor"] = advisor
+            if advisor.get("status") == "success":
+                final_tickets = advisor.get("selected_tickets") or []
+                final_source = "codex"
+                final_conclusion = advisor.get("conclusion") or ""
+                final_confidence = advisor.get("confidence", "low")
+            else:
+                final_tickets = roundtable.get("decision", {}).get("selected_tickets") or []
+                final_source = "ensemble_fallback"
+                final_conclusion = roundtable.get("decision", {}).get("conclusion") or ""
+                final_confidence = roundtable.get("decision", {}).get("confidence", "low")
+            forecast["final_recommendation"] = {
+                "source": final_source,
+                "tickets": final_tickets,
+                "conclusion": final_conclusion,
+                "confidence": final_confidence,
+                "advisor_model": advisor.get("model"),
+            }
+            vietlott.db.vietlott_cache.update_one(
+                {"_id": product},
+                {"$set": {"forecast": forecast, "updated_at": datetime.now().isoformat()}},
+            )
+            if advisor.get("status") != "success":
+                raise RuntimeError(advisor.get("message") or "Codex chưa trả về kết luận.")
+
+        _set_codex_retry_status(
+            key,
+            status="completed",
+            stage="Codex đã đọc lại biên bản và cập nhật kết luận",
+            progress=100,
+            error=None,
+        )
+    except Exception as retry_error:
+        _set_codex_retry_status(
+            key,
+            status="error",
+            stage="Không thể gửi lại yêu cầu Codex",
+            progress=100,
+            error=retry_error,
+        )
+        print(f"Codex retry failed for {key}: {retry_error}")
+
+
+def _queue_codex_retry(kind, product=None):
+    key = _codex_retry_key(kind, product)
+    with codex_retry_lock:
+        current = _get_codex_retry_status(key)
+        if current.get("status") in {"queued", "running"}:
+            return current
+        if kind == "gold":
+            if not _get_gold_codex_retry_snapshot():
+                raise ValueError("Chưa có biên bản hội nghị vàng để gửi lại Codex.")
+        else:
+            cached = vietlott.db.vietlott_cache.find_one({"_id": product}, {"forecast": 1})
+            if not cached or not cached.get("forecast"):
+                raise ValueError(f"Chưa có forecast {product} để gửi lại Codex.")
+        _set_codex_retry_status(
+            key,
+            status="queued",
+            stage="Đang xếp hàng gửi lại biên bản hội nghị",
+            progress=1,
+        )
+        worker = threading.Thread(
+            target=_run_codex_retry,
+            args=(kind, product),
+            name=f"codex-retry-{key.replace(':', '-')}",
+            daemon=True,
+        )
+        codex_retry_workers[key] = worker
+        worker.start()
+        return _get_codex_retry_status(key)
 
 
 def _snapshot_gold_backtest_job(job):
@@ -494,6 +711,7 @@ def _run_gold_predictions_with_status(source="manual"):
     )
     try:
         result = crawler.get_gold_predictions(progress_callback=_gold_prediction_progress)
+        _persist_gold_codex_retry_snapshot(result)
         # Store the payload before marking the status completed.  This avoids
         # a race where the UI sees 100% but the result is not ready yet.
         with gold_prediction_result_lock:
@@ -1771,6 +1989,23 @@ async def get_gold_prediction_status_api():
     return JSONResponse(content=_get_gold_prediction_status())
 
 
+@app.post("/api/gold/codex/retry", status_code=202)
+async def retry_gold_codex():
+    """Retry only the Codex chair using the latest saved Gold meeting."""
+    try:
+        status = _queue_codex_retry("gold")
+        return JSONResponse(status_code=202, content=jsonable_encoder(status))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/api/gold/codex/retry-status")
+async def get_gold_codex_retry_status():
+    return JSONResponse(content=_get_codex_retry_status("gold"))
+
+
 @app.post("/api/gold/refresh")
 async def refresh_gold():
     """Force-refresh market data and queue one fresh AI prediction job."""
@@ -1857,6 +2092,29 @@ async def get_vietlott(product: str):
         raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/vietlott/{product}/codex/retry", status_code=202)
+async def retry_vietlott_codex(product: str):
+    """Retry only the Codex chair for an existing Vietlott forecast."""
+    product = product.strip().lower()
+    if product not in vietlott.PRODUCTS:
+        raise HTTPException(status_code=400, detail=f"Sản phẩm {product} không được hỗ trợ.")
+    try:
+        status = _queue_codex_retry("vietlott", product)
+        return JSONResponse(status_code=202, content=jsonable_encoder({"product": product, **status}))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@app.get("/api/vietlott/{product}/codex/retry-status")
+async def get_vietlott_codex_retry_status(product: str):
+    product = product.strip().lower()
+    if product not in vietlott.PRODUCTS:
+        raise HTTPException(status_code=400, detail=f"Sản phẩm {product} không được hỗ trợ.")
+    return JSONResponse(content={"product": product, **_get_codex_retry_status(_codex_retry_key("vietlott", product))})
 
 
 @app.post("/api/vietlott/{product}/retrain")
