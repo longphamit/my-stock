@@ -1165,6 +1165,10 @@ async def gold_price_page(request: Request):
 async def gold_prediction_page(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
 
+@app.get("/activity", response_class=HTMLResponse)
+async def background_activity_page(request: Request):
+    return templates.TemplateResponse(request=request, name="index.html")
+
 
 
 @app.get("/vietlott", response_class=HTMLResponse)
@@ -1270,6 +1274,10 @@ def run_gold_crawler_sync(loop_count):
         print("Background crawler: Scraping live gold prices, crude oil, and macro indicators...")
         # bypass_cache=True forces crawler to crawl new data and update MongoDB cache doc
         crawler.fetch_gold_prices(bypass_cache=True)
+        # The price crawl also writes today's close into gold_history. Resolve
+        # any older forecast rows immediately so the verification table does
+        # not wait until the next 05:00 prediction job to show actual prices.
+        crawler.resolve_unresolved_predictions()
         print("Background crawler: Successfully updated MongoDB cache.")
         
         # Update macro history from yfinance + FRED real yield every 60 minutes or on startup
@@ -1829,6 +1837,7 @@ def _load_gold_data_sync():
                 "dxy", "brent", "dji", "spx", "gld", "gld_trust", "us10y", "vix",
                 "real_yield", "t10yie",
                 "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
             ],
         )
 
@@ -1840,7 +1849,12 @@ def _load_gold_data_sync():
             print(f"Error refreshing economic calendar for dashboard: {calendar_error}")
 
         macro_indicators = data.get("macro_indicators") or {}
-        if not macro_indicators.get("pce") or not macro_indicators.get("core_pce"):
+        if (
+            not macro_indicators.get("pce")
+            or not macro_indicators.get("core_pce")
+            or not macro_indicators.get("ppi")
+            or not macro_indicators.get("core_ppi")
+        ):
             try:
                 macro_indicators = crawler.fetch_us_macro_indicators()
                 data["macro_indicators"] = macro_indicators

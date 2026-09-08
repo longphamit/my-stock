@@ -129,6 +129,10 @@
     color: var(--ui-red);
 }
 
+.ui-redesign #header-nav-tabs .tab-btn:nth-child(4).active {
+    color: var(--ui-blue);
+}
+
 .ui-redesign .header-status {
     background: var(--ui-surface-muted) !important;
     border-color: var(--ui-line) !important;

@@ -225,7 +225,10 @@ def _compact_roundtable_input(analysis):
         "confidence_pct": fed.get("confidence_pct"),
         "inflation": {
             key: (fed.get("inflation") or {}).get(key)
-            for key in ("label", "score", "cpi_yoy", "pce_yoy", "core_pce_yoy", "core_pce_mom")
+            for key in (
+                "label", "score", "cpi_yoy", "pce_yoy", "core_pce_yoy", "core_pce_mom",
+                "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+            )
         },
         "fed_action": {
             key: (fed.get("fed_action") or {}).get(key)
@@ -274,8 +277,8 @@ def _compact_roundtable_input(analysis):
             for key in (
                 "date", "close", "world_price", "return_1d", "dxy", "us10y",
                 "vix", "brent", "real_yield", "xagusd", "pce_headline_yoy",
-                "pce_core_yoy", "days_to_fed", "days_to_cpi", "days_to_nfp",
-                "days_to_pce",
+                "pce_core_yoy", "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+                "days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "days_to_ppi",
             )
             if item.get(key) is not None
         })
@@ -326,7 +329,7 @@ def _compact_roundtable_input(analysis):
         "source_data": {
             "recent_market_history": recent_history,
             # The crawler orders this as the latest released events followed
-            # by upcoming releases; keep the tail so FOMC/CPI/PCE/NFP dates
+            # by upcoming releases; keep the tail so FOMC/CPI/PCE/PPI/NFP dates
             # near the forecast are not displaced by old January rows.
             "economic_calendar": (source_data.get("economic_calendar") or [])[-12:],
             "geopolitical_events": (source_data.get("geopolitical_events") or [])[:5],
@@ -546,7 +549,7 @@ def generate_gold_roundtable_advice(analysis, timeout_seconds=None, session=None
         "file, không sửa source code và không tạo project. Bạn là chủ tọa độc lập của hội nghị "
         "dự báo giá vàng. Hãy suy luận bằng tiếng Việt "
         "chỉ từ báo cáo được cung cấp. Đánh giá cả phiếu số lượng, trọng số OOS, độ tin cậy, "
-        "đường giá từng mô hình, FED/PCE/dữ liệu kinh tế, tin tức và địa chính trị. Không bịa "
+        "đường giá từng mô hình, FED/CPI/PCE/PPI/dữ liệu kinh tế, tin tức và địa chính trị. Không bịa "
         "thêm sự kiện hoặc con số. Không coi đồng thuận là chắc chắn; nêu ý kiến thiểu số và "
         "rủi ro. Phải kết luận riêng T+1 đến T+5 bằng tư duy khoa học: phiếu model là bằng chứng "
         "có tương quan, không phải chân lý; trước mỗi kết luận phải đối chiếu argument/evidence và "
@@ -563,7 +566,7 @@ def generate_gold_roundtable_advice(analysis, timeout_seconds=None, session=None
         "đầu tư. Nếu bằng chứng yếu hoặc mâu thuẫn, hạ confidence và nêu rõ rủi ro. "
         "Ngoài kết luận giá vàng T+1 đến T+5, bắt buộc đưa ra fed_forecast cho kỳ họp FED kế tiếp: "
         "chọn đúng một action hike/hold/cut, phân bổ xác suất hike/hold/cut, bias hawkish/neutral/dovish "
-        "và gold_implication up/down/sideways. Phải đối chiếu fed_policy_outlook, dữ liệu CPI/PCE, việc làm, "
+        "và gold_implication up/down/sideways. Phải đối chiếu fed_policy_outlook, dữ liệu CPI/PCE/PPI, việc làm, "
         "lợi suất, DXY, sự kiện FOMC và fed_vote của từng model; không được coi đây là thông báo chính thức của FED. "
         "Chỉ trả về đúng một JSON object, không Markdown, không giải thích ngoài JSON. JSON phải "
         "tuân thủ schema được cung cấp."

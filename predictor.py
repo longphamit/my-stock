@@ -6,14 +6,14 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 
 
-GOLD_MODEL_VERSION = "gold-oos-calibrated-v8-20260906"
+GOLD_MODEL_VERSION = "gold-oos-calibrated-v9-ppi-20260907"
 
 
 GOLD_MACRO_LEVEL_FEATURES = [
     "dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd", "xagusd",
     "real_yield", "gld", "gld_trust", "days_to_fed", "days_to_cpi", "days_to_nfp",
-    "days_to_pce", "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom",
-    "pce_core_mom",
+    "days_to_pce", "days_to_ppi", "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom",
+    "pce_core_mom", "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
 ]
 
 GOLD_MACRO_DERIVED_FEATURES = [
@@ -30,6 +30,7 @@ GOLD_MACRO_DERIVED_FEATURES = [
     "real_yield_change_1d", "real_yield_change_5d",
     "pce_headline_yoy_change", "pce_core_yoy_change",
     "pce_headline_mom_change", "pce_core_mom_change",
+    "ppi_yoy_change", "core_ppi_yoy_change", "ppi_mom_change", "core_ppi_mom_change",
     "gold_silver_ratio", "event_risk_3d",
 ]
 
@@ -42,10 +43,13 @@ GOLD_CORE_MODEL_FEATURES = [
 
 GOLD_STABLE_MACRO_FEATURES = [
     "dxy_return_1d", "us10y_change_1d", "real_yield_change_1d",
-    "days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce",
+    "days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "days_to_ppi",
     "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
     "pce_headline_yoy_change", "pce_core_yoy_change",
-    "pce_headline_mom_change", "pce_core_mom_change", "event_risk_3d",
+    "pce_headline_mom_change", "pce_core_mom_change",
+    "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+    "ppi_yoy_change", "core_ppi_yoy_change", "ppi_mom_change", "core_ppi_mom_change",
+    "event_risk_3d",
 ]
 
 
@@ -75,7 +79,7 @@ def _gold_model_feature_columns(df):
         if col in df.columns
     )
     ordered.extend(
-        col for col in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "event_risk_3d")
+        col for col in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "days_to_ppi", "event_risk_3d")
         if col in df.columns
     )
     return list(dict.fromkeys(ordered))
@@ -91,8 +95,10 @@ GOLD_CNN_FEATURE_DEFAULTS = {
     "dji": 35000.0, "spx": 5000.0, "eurusd": 1.08, "xagusd": 25.0,
     "real_yield": 1.5, "gld": 200.0, "gld_trust": 200.0,
     "days_to_fed": 15.0, "days_to_cpi": 15.0, "days_to_nfp": 15.0,
-    "days_to_pce": 15.0, "pce_headline_yoy": 2.5, "pce_core_yoy": 2.7,
-    "pce_headline_mom": 0.2, "pce_core_mom": 0.2, "event_risk_3d": 0.0,
+    "days_to_pce": 15.0, "days_to_ppi": 15.0, "pce_headline_yoy": 2.5, "pce_core_yoy": 2.7,
+    "pce_headline_mom": 0.2, "pce_core_mom": 0.2,
+    "ppi_yoy": 2.5, "core_ppi_yoy": 2.5, "ppi_mom": 0.2, "core_ppi_mom": 0.2,
+    "event_risk_3d": 0.0,
     "gold_silver_ratio": 80.0,
 }
 
@@ -694,7 +700,10 @@ def calculate_technical_indicators(df):
     # PCE is monthly and remains unchanged between releases.  A one-row
     # change therefore marks the first trading session that can use the newly
     # released value without leaking it into earlier rows.
-    for col in ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom"):
+    for col in (
+        "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+        "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+    ):
         if col in df.columns:
             numeric = pd.to_numeric(df[col], errors="coerce")
             df[f"{col}_change"] = numeric.diff(1)
@@ -703,7 +712,7 @@ def calculate_technical_indicators(df):
         silver = pd.to_numeric(df["xagusd"], errors="coerce")
         df["gold_silver_ratio"] = df["close"] / (silver + 1e-10)
 
-    event_cols = [col for col in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce") if col in df.columns]
+    event_cols = [col for col in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "days_to_ppi") if col in df.columns]
     if event_cols:
         event_distance = df[event_cols].apply(pd.to_numeric, errors="coerce").min(axis=1)
         df["event_risk_3d"] = (event_distance <= 3).astype(float)
@@ -2105,13 +2114,15 @@ def analyze_and_recommend(
         signed_vote = float(np.sum(weights_array * np.sign(returns)))
         raw_return = float(np.sum(weights_array * returns))
         consensus = float(abs(signed_vote))
-        # Persistence (tomorrow ~= today) is a hard baseline for liquid prices.
-        # If OOS quality is weak, only accept a fraction of the model move. As
-        # quality and direction consensus improve, the forecast can express a
-        # larger move instead of being permanently over-conservative.
-        # When every holdout R² is negative, the learned move should be close
-        # to persistence instead of retaining half of an unreliable signal.
-        quality_multiplier = 0.05 + 0.95 * np.sqrt(positive_oos_quality)
+        # Persistence (tomorrow ~= today) is a useful baseline for liquid
+        # prices, but it must not erase the forecast term structure.  The old
+        # 0.05 floor compressed a weak-OOS five-step path to only 5-6% of its
+        # model move, so T+1...T+5 often differed by a few cents even when
+        # the member models had a visible path.  Use OOS to lower confidence
+        # and adaptive weights, while retaining a conservative 25% of the
+        # model path as the point forecast.  This keeps uncertainty visible
+        # in the interval/confidence fields without fabricating volatility.
+        quality_multiplier = 0.25 + 0.75 * np.sqrt(positive_oos_quality)
         consensus_multiplier = 0.30 + 0.70 * consensus
         model_return = raw_return * quality_multiplier * consensus_multiplier
         # Context has already been applied consistently to each component
@@ -2183,6 +2194,9 @@ def analyze_and_recommend(
     ens_metrics["ml_prediction"]["context_overlay_scope"] = "toàn bộ 6 mô hình + Ensemble"
     ens_metrics["ml_prediction"]["daily_volatility"] = daily_volatility
     ens_metrics["ml_prediction"]["oos_reliability"] = float(positive_oos_quality)
+    ens_metrics["ml_prediction"]["oos_path_multiplier"] = float(
+        0.25 + 0.75 * np.sqrt(max(0.0, min(1.0, positive_oos_quality)))
+    )
     ens_metrics["ml_prediction"]["confidence_label"] = confidence_label
     ens_metrics["ml_prediction"]["market_context"] = market_context
     ens_metrics["ml_prediction"]["profit_taking_risk"] = profit_taking_risk

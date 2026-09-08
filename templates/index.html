@@ -2607,7 +2607,7 @@
                 grid-column: 1 / -1;
                 grid-row: 2;
                 display: grid;
-                grid-template-columns: repeat(3, minmax(0, 1fr));
+                grid-template-columns: repeat(4, minmax(0, 1fr));
                 width: 100%;
                 margin: 0;
                 overflow: visible;
@@ -2676,7 +2676,7 @@
                 grid-column: 1 / -1;
                 grid-row: 2;
                 display: grid;
-                grid-template-columns: repeat(3, minmax(0, 1fr));
+                grid-template-columns: repeat(4, minmax(0, 1fr));
                 width: 100%;
                 margin: 0;
                 overflow: visible;
@@ -2821,7 +2821,8 @@
             .panel-header h3,
             .panel-header h4 { line-height: 1.35; }
 
-            #calendar-dashboard-content { padding: 0.8rem !important; }
+            #calendar-dashboard-content,
+            #background-activity-dashboard-content { padding: 0.8rem !important; }
 
             .table-container {
                 width: 100%;
@@ -2934,6 +2935,9 @@
             <button class="tab-btn" onclick="selectVietlottDashboard()" id="tab-vietlott-list">
                 <i class="fa-solid fa-ticket" style="color: #f43f5e; margin-right: 2px;"></i> Xổ Số
             </button>
+            <button class="tab-btn" onclick="selectBackgroundActivityDashboard()" id="tab-background-activity-list">
+                <i class="fa-solid fa-clock-rotate-left" style="color: #60a5fa; margin-right: 2px;"></i> Hoạt Động Nền
+            </button>
         </div>
 
         <div class="header-right">
@@ -2968,7 +2972,7 @@
     <main class="main-container">
 
         <!-- LEFT: Gold & Vietlott Navigation -->
-        <section class="glass-panel" id="left-sidebar" aria-label="Điều hướng Gold và Vietlott">
+        <section class="glass-panel" id="left-sidebar" aria-label="Điều hướng Gold, Vietlott và hoạt động nền">
             <div class="panel-header">
                 <h2 id="sidebar-panel-header">
                     <i class="fa-solid fa-list-check" style="color: var(--accent-primary)"></i>
@@ -3008,7 +3012,7 @@
                     <button class="gold-nav-item" onclick="scrollToGoldSection('gold-backtest-section')">
                         <i class="fa-solid fa-flask"></i> <span>5. Backtest Mô Hình</span>
                     </button>
-                    <button class="gold-nav-item" onclick="scrollToGoldSection('background-activity-section')">
+                    <button class="gold-nav-item" onclick="selectBackgroundActivityDashboard()">
                         <i class="fa-solid fa-clock-rotate-left"></i> <span>6. Lịch Sử Hoạt Động Nền</span>
                     </button>
                     <button class="gold-nav-item" onclick="scrollToGoldSection('swing-calculator-section')">
@@ -3046,6 +3050,20 @@
                 </div>
             </div>
 
+            <!-- Background Activity Tab Content (Sidebar) -->
+            <div id="background-activity-tab-content" style="display: none; padding: 0.75rem 0.5rem 0.75rem 0.5rem;">
+                <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #60a5fa; font-weight: 600; font-size: 0.82rem;">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                    <span>Giám Sát Hoạt Động Nền</span>
+                </div>
+                <p style="font-size: 0.72rem; color: var(--text-secondary); line-height: 1.45; margin: 0 0 0.9rem 0;">
+                    Theo dõi các lần cào dữ liệu, train/dự đoán và đồng bộ kết quả của hệ thống theo múi giờ Việt Nam.
+                </p>
+                <button class="btn-refresh" onclick="loadBackgroundActivityHistory()" style="width: 100%; justify-content: center; border-color: rgba(96,165,250,0.35); background: rgba(96,165,250,0.08); color: #60a5fa;">
+                    <i class="fa-solid fa-rotate"></i> Cập nhật lịch sử
+                </button>
+            </div>
+
             <!-- Vietlott Tab Content (Sidebar) -->
             <div id="vietlott-tab-content" style="display: none; padding: 0.75rem 0.5rem 0.75rem 0.5rem;">
                 <div class="sidebar-section-title" style="margin-bottom: 0.6rem; display: flex; align-items: center; gap: 0.5rem; color: #f43f5e; font-weight: 600; font-size: 0.82rem;">
@@ -3075,7 +3093,7 @@
         </section>
 
         <!-- RIGHT: Gold & Vietlott Analysis -->
-        <section class="glass-panel" id="detail-card-panel" aria-label="Bảng điều khiển Gold và Vietlott">
+        <section class="glass-panel" id="detail-card-panel" aria-label="Bảng điều khiển Gold, Vietlott và hoạt động nền">
 
             <!-- Gold Dashboard content -->
             <div id="gold-dashboard-content" class="detail-panel" style="display:none;">
@@ -3252,6 +3270,38 @@
                                     </div>
                                 </div>
                                 <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">CPI tăng ➔ Vàng tăng; CPI giảm ➔ Vàng giảm</p>
+                            </div>
+
+                            <!-- PPI Card -->
+                            <div style="padding: 1rem; background: rgba(249, 115, 22, 0.03); border: 1px solid rgba(249, 115, 22, 0.14); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #fb923c; font-size: 0.9rem;"><i class="fa-solid fa-industry" style="margin-right: 0.35rem;"></i>PPI (Giá Sản Xuất Mỹ)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(249, 115, 22, 0.1); color: #fb923c; border-radius: 4px; font-weight: 600;">TÍN HIỆU SỚM</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-ppi-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(148, 163, 184, 0.1); color: #94a3b8;">--</span>
+                                        <span id="macro-ppi-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--%</span>
+                                        <span id="macro-ppi-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">PPI cao ➔ kỳ vọng FED hawkish ➔ vàng chịu áp lực; hạ nhiệt có tác động ngược lại</p>
+                            </div>
+
+                            <!-- Core PPI Card -->
+                            <div style="padding: 1rem; background: rgba(234, 88, 12, 0.03); border: 1px solid rgba(234, 88, 12, 0.14); border-radius: 8px; display: flex; flex-direction: column; justify-content: space-between;">
+                                <div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                        <span style="font-weight: 700; color: #ea580c; font-size: 0.9rem;"><i class="fa-solid fa-filter-circle-dollar" style="margin-right: 0.35rem;"></i>Core PPI (PPI Lõi)</span>
+                                        <span style="font-size: 0.72rem; padding: 0.1rem 0.4rem; background: rgba(234, 88, 12, 0.1); color: #ea580c; border-radius: 4px; font-weight: 600;">ĐẦU VÀO FED</span>
+                                    </div>
+                                    <div style="display: flex; align-items: baseline; gap: 0.5rem; margin-bottom: 0.5rem;">
+                                        <span id="macro-core-ppi-trend" style="font-size: 0.72rem; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(148, 163, 184, 0.1); color: #94a3b8;">--</span>
+                                        <span id="macro-core-ppi-value" style="font-size: 1.6rem; font-weight: 800; color: var(--text-primary); font-family: 'JetBrains Mono', monospace;">--%</span>
+                                        <span id="macro-core-ppi-date" style="font-size: 0.7rem; color: var(--text-muted);">--</span>
+                                    </div>
+                                </div>
+                                <p style="font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; margin: 0; border-top: 1px solid rgba(255,255,255,0.04); padding-top: 0.4rem;">Core PPI dai dẳng ➔ khó hạ lãi suất ➔ tác động giảm lên vàng</p>
                             </div>
 
                             <!-- NFP Card -->
@@ -3893,38 +3943,6 @@
                         <div class="forecast-grid" id="gold-forecast-grid"></div>
                     </div>
 
-                    <!-- Background activity history -->
-                    <div id="background-activity-section" class="forecast-section" style="margin-bottom: 1.5rem;">
-                        <div class="forecast-title" style="display:flex; justify-content:space-between; align-items:center; gap:0.75rem; flex-wrap:wrap;">
-                            <div style="display:flex; align-items:center; gap:0.5rem;">
-                                <i class="fa-solid fa-clock-rotate-left" style="color:#60a5fa"></i>
-                                <span>Lịch Sử Hoạt Động Nền</span>
-                            </div>
-                            <button id="background-activity-refresh-btn" onclick="loadBackgroundActivityHistory()" style="border:1px solid rgba(96,165,250,0.35);background:rgba(96,165,250,0.08);color:#60a5fa;border-radius:6px;padding:0.45rem 0.7rem;font-weight:700;font-size:0.72rem;cursor:pointer;">
-                                <i id="background-activity-refresh-icon" class="fa-solid fa-rotate" style="margin-right:0.3rem;"></i>Cập nhật
-                            </button>
-                        </div>
-                        <div style="font-size:0.74rem;color:var(--text-muted);margin:0.45rem 0 0.9rem;line-height:1.45;">
-                            Theo dõi thời gian cào dữ liệu, train/dự đoán và cập nhật kết quả lịch sự kiện theo múi giờ Việt Nam.
-                        </div>
-                        <div id="background-activity-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0.6rem;margin-bottom:0.9rem;"></div>
-                        <div class="table-container" style="overflow-x:auto;">
-                            <table style="width:100%;min-width:900px;border-collapse:collapse;font-size:0.73rem;">
-                                <thead>
-                                    <tr>
-                                        <th style="text-align:left;">Tác vụ</th>
-                                        <th style="text-align:left;">Nguồn</th>
-                                        <th style="text-align:left;">Bắt đầu / Kết thúc</th>
-                                        <th style="text-align:left;">Cào dữ liệu</th>
-                                        <th style="text-align:left;">Training / Tổng</th>
-                                        <th style="text-align:left;">Trạng thái</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="background-activity-tbody"></tbody>
-                            </table>
-                        </div>
-                    </div>
-
                     <!-- ====================================================
                          MÁY TÍNH LƯỚT SÓNG VÀNG THẾ GIỚI
                     ==================================================== -->
@@ -4108,6 +4126,45 @@
                         </table>
                 </div>
             </div>
+            </div>
+
+            <!-- Background Activity Dashboard content -->
+            <div id="background-activity-dashboard-content" class="detail-panel" style="display:none; padding: 1.5rem;">
+                <div class="detail-ticker-header" style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--panel-border); padding-bottom: 1rem;">
+                    <div class="detail-title-block">
+                        <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                            <h3 style="margin: 0; font-size: 1.25rem; font-weight: 700; color: #60a5fa;">
+                                <i class="fa-solid fa-clock-rotate-left" style="margin-right: 0.5rem;"></i>Lịch Sử Hoạt Động Nền
+                            </h3>
+                            <span style="font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 700; background: rgba(96, 165, 250, 0.1); color: #60a5fa; border: 1px solid rgba(96, 165, 250, 0.2);">SYSTEM MONITORING</span>
+                        </div>
+                        <div style="font-size: 0.76rem; color: var(--text-muted); margin-top: 0.35rem; line-height: 1.4;">
+                            Theo dõi thời gian cào dữ liệu, train/dự đoán và cập nhật kết quả lịch sự kiện theo múi giờ Việt Nam.
+                        </div>
+                    </div>
+                    <button id="background-activity-refresh-btn" onclick="loadBackgroundActivityHistory()" style="border:1px solid rgba(96,165,250,0.35);background:rgba(96,165,250,0.08);color:#60a5fa;border-radius:6px;padding:0.55rem 0.8rem;font-weight:700;font-size:0.72rem;cursor:pointer;white-space:nowrap;">
+                        <i id="background-activity-refresh-icon" class="fa-solid fa-rotate" style="margin-right:0.3rem;"></i>Cập nhật
+                    </button>
+                </div>
+
+                <div id="background-activity-section" class="forecast-section" style="margin-bottom: 1.5rem;">
+                    <div id="background-activity-summary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0.6rem;margin-bottom:0.9rem;"></div>
+                    <div class="table-container" style="overflow-x:auto;">
+                        <table style="width:100%;min-width:900px;border-collapse:collapse;font-size:0.73rem;">
+                            <thead>
+                                <tr>
+                                    <th style="text-align:left;">Tác vụ</th>
+                                    <th style="text-align:left;">Nguồn</th>
+                                    <th style="text-align:left;">Bắt đầu / Kết thúc</th>
+                                    <th style="text-align:left;">Cào dữ liệu</th>
+                                    <th style="text-align:left;">Training / Tổng</th>
+                                    <th style="text-align:left;">Trạng thái</th>
+                                </tr>
+                            </thead>
+                            <tbody id="background-activity-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
             <!-- Vietlott Dashboard Content -->
@@ -4816,6 +4873,10 @@
                 await refreshVietlottData();
                 return;
             }
+            if (activeSidebarTab === 'background') {
+                await loadBackgroundActivityHistory();
+                return;
+            }
             if (activeSidebarTab === 'gold' || activeSidebarTab === 'calendar') {
                 const refreshBtn = document.getElementById('refresh-btn');
                 if (refreshBtn) refreshBtn.querySelector('i').style.animation = 'spin 0.6s linear infinite';
@@ -4892,6 +4953,7 @@
             document.getElementById('tab-gold-list')?.classList.toggle('active', tabName === 'gold');
             document.getElementById('tab-calendar-list')?.classList.toggle('active', tabName === 'calendar');
             document.getElementById('tab-vietlott-list')?.classList.toggle('active', tabName === 'vietlott');
+            document.getElementById('tab-background-activity-list')?.classList.toggle('active', tabName === 'background');
 
             // Toggle gold sub-tabs visibility
             const goldSubTabs = document.getElementById('gold-sub-tabs');
@@ -4907,6 +4969,11 @@
                         <i class="fa-solid fa-ticket" style="color: #f43f5e"></i>
                         <span>Xổ Số Vietlott</span>
                     `;
+                } else if (tabName === 'background') {
+                    headerEl.innerHTML = `
+                        <i class="fa-solid fa-clock-rotate-left" style="color: #60a5fa"></i>
+                        <span>Hoạt Động Nền</span>
+                    `;
                 } else {
                     headerEl.innerHTML = `
                         <i class="fa-solid fa-coins" style="color: #fbbf24"></i>
@@ -4915,8 +4982,9 @@
                 }
             }
 
-            document.getElementById('gold-tab-content').style.display      = (tabName === 'gold' || tabName === 'calendar') ? 'block' : 'none';
-            document.getElementById('vietlott-tab-content').style.display  = tabName === 'vietlott' ? 'block' : 'none';
+            document.getElementById('gold-tab-content').style.display = (tabName === 'gold' || tabName === 'calendar') ? 'block' : 'none';
+            document.getElementById('background-activity-tab-content').style.display = tabName === 'background' ? 'block' : 'none';
+            document.getElementById('vietlott-tab-content').style.display = tabName === 'vietlott' ? 'block' : 'none';
 
             // Hide dashboards that are not active
             if (tabName !== 'gold') {
@@ -4926,6 +4994,13 @@
                 const calPanel = document.getElementById('calendar-dashboard-content');
                 if (calPanel) calPanel.style.display = 'none';
             }
+            if (tabName !== 'background') {
+                const activityPanel = document.getElementById('background-activity-dashboard-content');
+                if (activityPanel) activityPanel.style.display = 'none';
+            } else {
+                const activityPanel = document.getElementById('background-activity-dashboard-content');
+                if (activityPanel) activityPanel.style.display = 'flex';
+            }
             if (tabName !== 'vietlott') {
                 document.getElementById('vietlott-dashboard-content').style.display = 'none';
             } else {
@@ -4933,6 +5008,13 @@
             }
 
             if (tabName === 'gold' || tabName === 'calendar') renderGoldSidebar();
+        }
+
+        async function selectBackgroundActivityDashboard() {
+            window.scrollTo({ top: 0, behavior: 'auto' });
+            window.history.pushState(null, '', '/activity');
+            switchSidebarTab('background');
+            await loadBackgroundActivityHistory();
         }
 
         function escapeBackgroundActivityHtml(value) {
@@ -6746,7 +6828,8 @@
                 const eventsEl = document.getElementById('gold-macro-events');
                 if (eventsEl && lm.days_to_fed !== undefined) {
                     const pceDays = lm.days_to_pce !== undefined ? ` | PCE:${lm.days_to_pce}d` : '';
-                    eventsEl.textContent = `FED:${lm.days_to_fed}d | CPI:${lm.days_to_cpi}d | NFP:${lm.days_to_nfp}d${pceDays}`;
+                    const ppiDays = lm.days_to_ppi !== undefined ? ` | PPI:${lm.days_to_ppi}d` : '';
+                    eventsEl.textContent = `FED:${lm.days_to_fed}d | CPI:${lm.days_to_cpi}d | NFP:${lm.days_to_nfp}d${pceDays}${ppiDays}`;
                     eventsEl.setAttribute('font-size', '7.2');
                 }
             }
@@ -7742,7 +7825,7 @@
             }
             const inflationValuesEl = document.getElementById('fed-inflation-values');
             if (inflationValuesEl) {
-                inflationValuesEl.textContent = `CPI: ${formatValue(inflation.cpi_yoy)}% · PCE: ${formatValue(inflation.pce_yoy)}% · Core PCE: ${formatValue(inflation.core_pce_yoy)}% · MoM: ${formatValue(inflation.core_pce_mom)}%`;
+                inflationValuesEl.textContent = `CPI: ${formatValue(inflation.cpi_yoy)}% · PCE: ${formatValue(inflation.pce_yoy)}% · Core PCE: ${formatValue(inflation.core_pce_yoy)}% · PPI: ${formatValue(inflation.ppi_yoy)}% · Core PPI: ${formatValue(inflation.core_ppi_yoy)}% · MoM: ${formatValue(inflation.core_pce_mom)}%`;
             }
 
             const actionEl = document.getElementById('fed-action-primary');
@@ -7835,6 +7918,8 @@
                     { key: 'cpi',            prefix: 'cpi',   isPercent: true },
                     { key: 'pce',            prefix: 'pce',   isPercent: true },
                     { key: 'core_pce',       prefix: 'core-pce', isPercent: true },
+                    { key: 'ppi',            prefix: 'ppi',   isPercent: true },
+                    { key: 'core_ppi',       prefix: 'core-ppi', isPercent: true },
                     { key: 'nonfarm',        prefix: 'nfp',   isPercent: false, suffix: ' nghìn' },
                     { key: 'unemployment',   prefix: 'unemp', isPercent: true },
                     { key: 'new_home_sales', prefix: 'home',  isPercent: false, suffix: ' nghìn căn/tháng' }
@@ -8141,10 +8226,12 @@
 
                 // Render model comparison table
                 renderGoldModelComparisonTable(goldData.predictions);
-
-                // Render verification history table
-                renderGoldVerificationHistory();
             }
+
+            // Keep the verification section populated even while the heavier
+            // prediction request is still loading. This also lets historical
+            // rows render independently from the live forecast cards.
+            renderGoldVerificationHistory();
 
             loadTradingViewGoldWidget();
 
@@ -8271,6 +8358,16 @@
             const liveModelData = goldData?.predictions?.models?.[activeModelKey];
             const liveT1Price = Number(liveModelData?.ml_prediction?.predicted_prices?.[0]);
             const liveForecastDate = goldData?.predictions?.forecast_date;
+            const todayVietnamParts = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Asia/Ho_Chi_Minh',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit'
+            }).formatToParts(new Date()).reduce((parts, part) => {
+                if (part.type !== 'literal') parts[part.type] = part.value;
+                return parts;
+            }, {});
+            const todayVietnam = `${todayVietnamParts.year}-${todayVietnamParts.month}-${todayVietnamParts.day}`;
 
             const activeModelLabel = document.getElementById('verification-active-model-name');
             if (activeModelLabel) activeModelLabel.textContent = mName;
@@ -8333,6 +8430,7 @@
 
                 // Find chronological index of this item in the sorted ascending history to get previous day's price
                 const i = goldPredictionHistory.findIndex(x => x.date === date);
+                const isFutureSession = date > todayVietnam;
 
                 let isCorrectDirection = true;
                 let trendHTML = '-';
@@ -8365,7 +8463,7 @@
                         if (actPrice === null || actPrice === undefined || actPrice === 0.0) {
                             trendHTML = `<div style="display:flex; flex-direction:column; gap:0.15rem; font-size:0.72rem;">
                                 <div>Dự báo: ${predTrendIcon}</div>
-                                <div style="color:var(--text-muted);">Thực tế: <span style="font-style:italic;">Chờ...</span></div>
+                                <div style="color:var(--text-muted);">Thực tế: <span style="font-style:italic;">${isFutureSession ? 'Chờ phiên' : 'Chưa đồng bộ'}</span></div>
                             </div>`;
                         } else {
                             const actTrend = actPrice > basePrice ? 'up' : (actPrice < basePrice ? 'down' : 'flat');
@@ -8396,10 +8494,12 @@
                 let learningBadgeHTML = '';
 
                 if (actPrice === null || actPrice === undefined || actPrice === 0.0) {
-                    actPriceText = '<span style="color:var(--text-muted);font-style:italic;">Chưa diễn ra</span>';
+                    actPriceText = isFutureSession
+                        ? '<span style="color:var(--text-muted);font-style:italic;">Chưa diễn ra</span>'
+                        : '<span style="color:#fbbf24;font-style:italic;">Chưa có dữ liệu thực tế</span>';
                     diffText = '-';
                     errorText = '-';
-                    ratingText = 'Đang chờ...';
+                    ratingText = isFutureSession ? 'Đang chờ...' : 'Chờ đồng bộ dữ liệu';
                     ratingClass = 'text-flat';
                 } else {
                     actPriceText = `$${actPrice.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
@@ -8649,6 +8749,12 @@
 
         function scrollToGoldSection(sectionId) {
             closeMobileSidebar();
+
+            if (sectionId === 'background-activity-section') {
+                selectBackgroundActivityDashboard();
+                return;
+            }
+
             // Determine which gold sub-tab contains this section
             const pricesSections = ['gold-section-prices', 'gold-section-chart', 'gold-section-brands'];
             if (pricesSections.includes(sectionId)) {
@@ -8865,6 +8971,28 @@
             }
 
             const advisor = meeting.chatgpt_advisor || data?.forecast?.chatgpt_advisor || {};
+            const candidateMap = new Map(
+                (Array.isArray(meeting.candidates) ? meeting.candidates : [])
+                    .filter(candidate => candidate && candidate.id)
+                    .map(candidate => [String(candidate.id), candidate])
+            );
+            const candidateReference = (candidateId) => {
+                const id = String(candidateId || '').trim();
+                const candidate = candidateMap.get(id);
+                if (!candidate) return `${id} (không tìm thấy trong biên bản)`;
+                const ticket = Array.isArray(candidate.ticket) ? candidate.ticket : [];
+                const mainNumbers = ticket.slice(0, gameId === 'power535' ? 5 : ticket.length)
+                    .map(number => String(number).padStart(2, '0'))
+                    .join('-');
+                const special = gameId === 'power535' && ticket.length > 5
+                    ? ` + ĐB ${String(ticket[5]).padStart(2, '0')}`
+                    : '';
+                return `${id} = ${mainNumbers}${special}`;
+            };
+            const explainCandidateReferences = (value) => String(value || '').replace(
+                /\bC\d+\b/g,
+                candidateId => candidateReference(candidateId)
+            );
             const fallbackDecision = meeting.decision || {};
             const isChatGPT = advisor.status === 'success' && Array.isArray(advisor.selected_tickets) && advisor.selected_tickets.length;
             const selectedTickets = isChatGPT ? advisor.selected_tickets : (fallbackDecision.selected_tickets || []);
@@ -8873,17 +9001,17 @@
             const confidenceLabels = {low: 'Thấp', medium: 'Trung bình', high: 'Cao'};
             const argumentsList = isChatGPT
                 ? [
-                    ...(advisor.key_arguments || []),
+                    ...(advisor.key_arguments || []).map(explainCandidateReferences),
                     ...(advisor.ticket_explanations || []).flatMap(item => [
-                        `Vé ${Number(item.ticket_index || 0)} · ${item.strategy_label || item.strategy || ''}: ${item.rationale || ''}`,
+                        `Vé ${Number(item.ticket_index || 0)} · ${item.strategy_label || item.strategy || ''}: ${explainCandidateReferences(item.rationale || '')}`,
                         ...((item.number_reasons || []).map(numberItem =>
-                            `Số ${String(numberItem.number).padStart(2, '0')}${numberItem.position === 'special' ? ' (đặc biệt)' : ''}: ${numberItem.reason || ''}`
+                            `Số ${String(numberItem.number).padStart(2, '0')}${numberItem.position === 'special' ? ' (đặc biệt)' : ''}: ${explainCandidateReferences(numberItem.reason || '')}`
                         ))
                     ]),
-                    advisor.dissenting_view ? `Ý kiến thiểu số: ${advisor.dissenting_view}` : '',
-                    advisor.risk_warning ? `Cảnh báo: ${advisor.risk_warning}` : ''
+                    advisor.dissenting_view ? `Ý kiến thiểu số: ${explainCandidateReferences(advisor.dissenting_view)}` : '',
+                    advisor.risk_warning ? `Cảnh báo: ${explainCandidateReferences(advisor.risk_warning)}` : ''
                 ].filter(Boolean)
-                : [fallbackDecision.conclusion || '', advisor.message || ''].filter(Boolean);
+                : [explainCandidateReferences(fallbackDecision.conclusion || ''), explainCandidateReferences(advisor.message || '')].filter(Boolean);
             const topVotes = (meeting.number_vote_tally || []).slice(0, 8);
             const ballHTML = (ticket, compact = false) => `<div class="vietlott-roundtable-ticket">${(ticket || []).map((number, index) => `<span class="vietlott-roundtable-ball${gameId === 'power535' && index === 5 ? ' power-special' : ''}" style="${compact ? 'width:1.3rem;height:1.3rem;font-size:0.55rem;' : ''}">${String(number).padStart(2, '0')}</span>`).join('')}</div>`;
 
@@ -8906,12 +9034,12 @@
                     ${selectedTickets.map((ticket, index) => {
                         const provenance = ticketProvenance[index] || {};
                         const sourceText = provenance.mode_label
-                            ? `${provenance.mode_label}${(provenance.source_candidate_ids || []).length ? ` · nguồn ${(provenance.source_candidate_ids || []).join(', ')}` : ''}`
+                            ? `${provenance.mode_label}${(provenance.source_candidate_ids || []).length ? ` · nguồn ${(provenance.source_candidate_ids || []).map(candidateReference).join(', ')}` : ''}`
                             : '';
                         return `${ballHTML(ticket)}${sourceText ? `<div class="gold-roundtable-advisor-meta" style="margin-bottom:0.35rem;">${escapeBackgroundActivityHtml(sourceText)}</div>` : ''}`;
                     }).join('')}
-                    <div class="gold-roundtable-chair-reason" style="margin-top:0.5rem;">${escapeBackgroundActivityHtml(isChatGPT ? advisor.conclusion : fallbackDecision.conclusion || '')}<br>Độ tin cậy: <strong>${escapeBackgroundActivityHtml(confidenceLabels[confidence] || confidence || 'Thấp')}</strong></div>
-                    ${!isChatGPT && advisor.message ? `<div class="gold-roundtable-advisor-warning"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeBackgroundActivityHtml(advisor.message)}</div>` : ''}
+                    <div class="gold-roundtable-chair-reason" style="margin-top:0.5rem;">${escapeBackgroundActivityHtml(explainCandidateReferences(isChatGPT ? advisor.conclusion : fallbackDecision.conclusion || ''))}<br>Độ tin cậy: <strong>${escapeBackgroundActivityHtml(confidenceLabels[confidence] || confidence || 'Thấp')}</strong></div>
+                    ${!isChatGPT && advisor.message ? `<div class="gold-roundtable-advisor-warning"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeBackgroundActivityHtml(explainCandidateReferences(advisor.message))}</div>` : ''}
                     ${!isChatGPT ? '<button type="button" id="vietlott-codex-retry-btn" class="gold-roundtable-codex-retry" onclick="retryVietlottCodex()"><i class="fa-solid fa-paper-plane"></i> Đẩy lại sang Codex</button>' : ''}
                     <button type="button" class="gold-roundtable-arguments-toggle" aria-expanded="false"><i class="fa-solid fa-scale-balanced"></i> Xem lập luận quyết định cuối</button>
                     <div class="gold-roundtable-arguments"><ul>${argumentsList.map(argument => `<li>${escapeBackgroundActivityHtml(argument)}</li>`).join('')}</ul></div>
@@ -8929,9 +9057,13 @@
 
             const inputSummary = meeting.advisor_input_summary || {};
             const groups = inputSummary.data_groups || meeting.data_groups || [];
+            const candidateLegend = Array.from(candidateMap.values()).map(candidate =>
+                `<span style="display:inline-block;margin:0.18rem 0.22rem;padding:0.16rem 0.35rem;border-radius:4px;background:rgba(251,191,36,0.1);">${escapeBackgroundActivityHtml(candidateReference(candidate.id))}</span>`
+            ).join('');
             dataEl.innerHTML = `
                 <strong><i class="fa-solid fa-database"></i> Dữ liệu thực tế đã đưa cho Codex suy luận:</strong>
                 ${groups.map(group => `<span style="display:inline-block;margin:0.18rem 0.22rem;padding:0.16rem 0.35rem;border-radius:4px;background:rgba(59,130,246,0.08);">${escapeBackgroundActivityHtml(group)}</span>`).join('')}
+                <div style="margin-top:0.3rem;"><strong>Ứng viên:</strong> ${candidateLegend || 'Chưa có danh sách ứng viên.'}</div>
                 <div style="margin-top:0.3rem;color:var(--text-muted);">${Number(inputSummary.recent_draw_count || 0)} kỳ gần nhất · ${Number(inputSummary.number_stat_count || 0)} số có thống kê · ${Number(inputSummary.candidate_feature_count || 0)} số ứng viên có vector đặc trưng · ${(inputSummary.backtest_models || []).length} nhóm backtest.</div>`;
         }
 
@@ -10877,6 +11009,8 @@
             // is clicked manually.
             if (window.location.pathname === '/vietlott') {
                 selectVietlottDashboard();
+            } else if (window.location.pathname === '/activity') {
+                selectBackgroundActivityDashboard();
             } else {
                 if (window.location.pathname === '/gold/prediction') {
                     activeGoldSubTab = 'forecast';

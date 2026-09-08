@@ -638,12 +638,21 @@ def _parse_calendar_date(value, year=None):
 
 def _parse_reference_period(title):
     """Return (month, year) from official release titles such as 'August 2026'."""
+    month_year_pattern = (
+        r"(January|February|March|April|May|June|July|August|"
+        r"September|October|November|December)\s+(\d{4})"
+    )
     match = re.search(
         r"(?:for|,|\()\s*(January|February|March|April|May|June|July|August|"
         r"September|October|November|December)\s+(\d{4})",
         str(title or ""),
         re.IGNORECASE,
     )
+    if not match:
+        # BLS iCalendar titles commonly use "Producer Price Index - July
+        # 2026" without the word "for".  The generic fallback is still
+        # constrained to a month followed by a four-digit year.
+        match = re.search(month_year_pattern, str(title or ""), re.IGNORECASE)
     if not match:
         return None
     month = _month_number(match.group(1))
@@ -860,7 +869,18 @@ def _build_bls_calendar_event(date, title, release_time="", source_url=None):
         impact = "CPI cao hơn kỳ vọng có thể làm FED giữ lãi suất cao lâu hơn và gây áp lực lên vàng."
     elif "producer price index" in title_lower:
         category, event_type = "PPI", "BLS_PPI_RELEASE"
-        event_name = f"Công bố PPI Mỹ · {title}"
+        period = _parse_reference_period(title)
+        if not period:
+            try:
+                release_dt = datetime.strptime(date, "%Y-%m-%d")
+                previous_year, previous_month = _previous_month(release_dt.year, release_dt.month)
+                period = (previous_month, previous_year)
+            except (TypeError, ValueError):
+                period = None
+        event_name = (
+            f"Công bố PPI Mỹ (Tháng {period[0]:02d}/{period[1]})"
+            if period else f"Công bố PPI Mỹ · {title}"
+        )
         impact = "PPI là tín hiệu sớm của áp lực giá, có thể làm thay đổi kỳ vọng chính sách FED."
     elif "job openings and labor turnover" in title_lower:
         category, event_type = "Việc làm", "BLS_JOLTS_RELEASE"
@@ -1181,6 +1201,126 @@ def update_pce_history_from_fred(days=365):
         return 0
 
 
+def update_ppi_history_from_bls(days=730):
+    """Attach headline/core PPI to macro rows only after release dates.
+
+    BLS publishes the PPI index by reference month while the model needs the
+    information set that was actually available on each trading day.  The
+    merge therefore uses the official calendar date as the information date;
+    historical periods without a retained calendar row receive a conservative
+    post-month fallback rather than being exposed before the month ends.
+    """
+    try:
+        crawl_official_us_economic_calendar()
+        now = datetime.now()
+        start_date = now - timedelta(days=max(int(days), 365))
+        end_date = now + timedelta(days=370)
+        headline = _fetch_bls_series("PPIFIS", start_date.year - 1, end_date.year)
+        core = _fetch_bls_series("WPSFD49116", start_date.year - 1, end_date.year)
+        if not headline and not core:
+            print("BLS returned empty PPI series.")
+            return 0
+
+        calendar_events = list(db.us_economic_calendar.find(
+            {"category": "PPI"},
+            {"_id": 0, "date": 1, "event": 1},
+        ))
+        release_map = {}
+        for event in calendar_events:
+            period = _event_period(event.get("event", ""))
+            date = event.get("date")
+            if period and date:
+                release_map[period] = str(date)
+
+        periods = sorted(set(headline) | set(core))
+        released_rows = []
+        for year, month in periods:
+            period_date = pd.Timestamp(year=year, month=month, day=1)
+            reference_month = f"{year:04d}-{month:02d}"
+            release_date = release_map.get((year, month))
+            if not release_date:
+                # BLS PPI is normally released in the following month.  This
+                # fallback is intentionally later than the reference month so
+                # it cannot leak the observation into that month.
+                release_date = (period_date + pd.offsets.MonthEnd(1) + pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+            headline_row = headline.get((year, month)) or {}
+            core_row = core.get((year, month)) or {}
+            previous_year, previous_month = _previous_month(year, month)
+            previous_period = headline.get((previous_year, previous_month)) or {}
+            previous_core_period = core.get((previous_year, previous_month)) or {}
+            year_ago = headline.get((year - 1, month)) or {}
+            core_year_ago = core.get((year - 1, month)) or {}
+
+            def _pct_change(current, previous):
+                if not current or not previous:
+                    return None
+                try:
+                    previous_value = float(previous.get("value"))
+                    current_value = float(current.get("value"))
+                    if previous_value == 0:
+                        return None
+                    return (current_value / previous_value - 1.0) * 100.0
+                except (TypeError, ValueError):
+                    return None
+
+            released_rows.append({
+                "release_date": release_date,
+                "ppi_reference_month": reference_month,
+                "ppi_yoy": _pct_change(headline_row, year_ago),
+                "core_ppi_yoy": _pct_change(core_row, core_year_ago),
+                "ppi_mom": _pct_change(headline_row, previous_period),
+                "core_ppi_mom": _pct_change(core_row, previous_core_period),
+            })
+
+        releases = pd.DataFrame(released_rows)
+        if releases.empty:
+            return 0
+        for field in ("ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom"):
+            releases[field] = pd.to_numeric(releases[field], errors="coerce")
+        releases["_release_dt"] = pd.to_datetime(releases["release_date"], errors="coerce")
+        releases = releases.dropna(subset=["_release_dt"]).sort_values("_release_dt")
+
+        macro_dates = list(db.macro_history.find({}, {"_id": 0, "date": 1}).sort("date", 1))
+        if not macro_dates:
+            return 0
+        macro_frame = pd.DataFrame(macro_dates)
+        macro_frame["_date_dt"] = pd.to_datetime(macro_frame["date"], errors="coerce")
+        macro_frame = macro_frame.dropna(subset=["_date_dt"]).sort_values("_date_dt")
+        merged = pd.merge_asof(
+            macro_frame,
+            releases,
+            left_on="_date_dt",
+            right_on="_release_dt",
+            direction="backward",
+        )
+
+        operations = []
+        ppi_fields = ("ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom")
+        for _, row in merged.iterrows():
+            values = {}
+            for field in ppi_fields:
+                value = row.get(field)
+                if value is not None and pd.notna(value):
+                    values[field] = float(value)
+            if not values:
+                continue
+            values["ppi_release_date"] = str(row.get("release_date"))
+            values["ppi_reference_month"] = str(row.get("ppi_reference_month"))
+            operations.append(UpdateOne(
+                {"date": str(row["date"])},
+                {"$set": values},
+                upsert=False,
+            ))
+
+        if operations:
+            result = db.macro_history.bulk_write(operations)
+            print(f"BLS: Updated PPI features on {result.modified_count} macro rows.")
+        return len(operations)
+    except Exception as error:
+        print(f"Error updating PPI history: {error}")
+        return 0
+
+
 def update_real_yield_from_fred(days=400):
     """
     Fetches 10-Year Breakeven Inflation Rate (T10YIE) from the free FRED API
@@ -1241,18 +1381,19 @@ def update_real_yield_from_fred(days=400):
 
 
 def update_all_macro(days=365):
-    """Update Yahoo Finance series plus FRED real-yield and PCE features."""
+    """Update market series plus real-yield, PCE and PPI features."""
     update_macro_history(days=days)
     update_real_yield_from_fred(days=days)
     update_pce_history_from_fred(days=days)
+    update_ppi_history_from_bls(days=max(days, 730))
 
 
 def calculate_days_until_events(dates_series):
     """
     Given a pandas Series of dates (in YYYY-MM-DD string format),
-    queries the us_economic_calendar collection in MongoDB and returns
-    four arrays containing the days until the next FED, CPI, NFP, and PCE
-    release. PCE dates come from the official BEA schedule.
+    queries the us_economic_calendar collection in MongoDB and returns five
+    arrays containing the days until the next FED, CPI, NFP, PCE, and PPI
+    release. PCE/PPI dates come from official release schedules.
     """
     # 1. Ensure the PCE schedule exists, then fetch all events from DB.
     try:
@@ -1273,6 +1414,7 @@ def calculate_days_until_events(dates_series):
         "CPI": [],
         "Việc làm": [],  # Non-Farm Payrolls category is 'Việc làm'
         "PCE": [],
+        "PPI": [],
     }
     
     for ev in events:
@@ -1314,8 +1456,9 @@ def calculate_days_until_events(dates_series):
     days_to_cpi = [get_days_until_next(d, "CPI") for d in dates_series]
     days_to_nfp = [get_days_until_next(d, "Việc làm") for d in dates_series]
     days_to_pce = [get_days_until_next(d, "PCE") for d in dates_series]
+    days_to_ppi = [get_days_until_next(d, "PPI") for d in dates_series]
     
-    return days_to_fed, days_to_cpi, days_to_nfp, days_to_pce
+    return days_to_fed, days_to_cpi, days_to_nfp, days_to_pce, days_to_ppi
 
 def calculate_dynamic_ensemble_weights(limit=20, return_diagnostics=False, model_version=None):
     """
@@ -1801,6 +1944,7 @@ def run_gold_month_backtest(year=None, month=9):
                         "dxy", "us10y", "vix", "brent", "dji", "spx",
                     "eurusd", "xagusd", "real_yield", "gld", "gld_trust",
                     "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                    "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
                     ]
                     available = [column for column in macro_columns if column in frame.columns]
                     if available:
@@ -1814,16 +1958,18 @@ def run_gold_month_backtest(year=None, month=9):
                 # during walk-forward evaluation without using any released
                 # value from after the target session.
                 try:
-                    days_to_fed, days_to_cpi, days_to_nfp, days_to_pce = calculate_days_until_events(frame["date"])
+                    days_to_fed, days_to_cpi, days_to_nfp, days_to_pce, days_to_ppi = calculate_days_until_events(frame["date"])
                     frame["days_to_fed"] = days_to_fed
                     frame["days_to_cpi"] = days_to_cpi
                     frame["days_to_nfp"] = days_to_nfp
                     frame["days_to_pce"] = days_to_pce
+                    frame["days_to_ppi"] = days_to_ppi
                 except Exception:
                     frame["days_to_fed"] = 15.0
                     frame["days_to_cpi"] = 15.0
                     frame["days_to_nfp"] = 15.0
                     frame["days_to_pce"] = 15.0
+                    frame["days_to_ppi"] = 15.0
 
                 frame_ind = pred_module.calculate_technical_indicators(frame)
                 predictions = {}
@@ -2080,18 +2226,20 @@ def tune_and_save_gold_hyperparameters():
                 "dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd",
                 "xagusd", "real_yield", "gld", "gld_trust",
                 "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
             ] if c in df.columns]
             df[cols] = df[cols].ffill()
 
         try:
-            days_to_fed, days_to_cpi, days_to_nfp, days_to_pce = calculate_days_until_events(df["date"])
+            days_to_fed, days_to_cpi, days_to_nfp, days_to_pce, days_to_ppi = calculate_days_until_events(df["date"])
             df["days_to_fed"] = days_to_fed
             df["days_to_cpi"] = days_to_cpi
             df["days_to_nfp"] = days_to_nfp
             df["days_to_pce"] = days_to_pce
+            df["days_to_ppi"] = days_to_ppi
         except Exception as event_error:
             print(f"Tuning event features unavailable: {event_error}")
-            for column in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce"):
+            for column in ("days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "days_to_ppi"):
                 df[column] = 15.0
             
         df_ind = pred_module.calculate_technical_indicators(df)
@@ -2706,6 +2854,8 @@ def generate_macro_error_analysis(df, target_date, error_val):
             event_notes.append("Số liệu lạm phát Mỹ (CPI) được công bố hôm nay (CPI tăng ➔ Vàng tăng (+); CPI giảm ➔ Vàng giảm (-)).")
         if "days_to_nfp" in row_curr and row_curr["days_to_nfp"] == 0:
             event_notes.append("Báo cáo việc làm phi nông nghiệp Mỹ (NFP) công bố hôm nay (NFP cao ➔ Vàng giảm (-); NFP thấp/xấu ➔ Vàng tăng (+)).")
+        if "days_to_ppi" in row_curr and row_curr["days_to_ppi"] == 0:
+            event_notes.append("Chỉ số giá sản xuất Mỹ (PPI) được công bố hôm nay (PPI cao có thể làm FED hawkish và gây áp lực lên vàng; PPI hạ nhiệt có tác động ngược lại).")
             
         macro_desc = " | ".join(explanations)
         if not macro_desc:
@@ -2775,12 +2925,14 @@ def get_gold_predictions(progress_callback=None):
         # --- Merge Macro Indicators ---
         macro_list = []
         try:
-            report_progress("Đồng bộ DXY, lợi suất, PCE/Core PCE và dữ liệu thị trường", 22)
+            report_progress("Đồng bộ DXY, lợi suất, PCE/Core PCE, PPI và dữ liệu thị trường", 22)
             latest_macro_doc = db.macro_history.find_one(
-                {}, {"_id": 0, "pce_release_date": 1}, sort=[("date", -1)]
+                {}, {"_id": 0, "pce_release_date": 1, "ppi_release_date": 1}, sort=[("date", -1)]
             ) or {}
             if not latest_macro_doc.get("pce_release_date"):
                 update_pce_history_from_fred(days=365)
+            if not latest_macro_doc.get("ppi_release_date"):
+                update_ppi_history_from_bls(days=730)
             macro_cursor = db.macro_history.find({}, {"_id": 0})
             macro_list = list(macro_cursor)
             if macro_list:
@@ -2792,6 +2944,7 @@ def get_gold_predictions(progress_callback=None):
                     "dxy", "us10y", "vix", "brent", "dji", "spx", "eurusd",
                     "xagusd", "real_yield", "gld", "gld_trust",
                     "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                    "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
                 ] if c in df.columns]
                 df[cols_to_fill] = df[cols_to_fill].ffill()
                 if "dji" not in df.columns:
@@ -2825,18 +2978,20 @@ def get_gold_predictions(progress_callback=None):
             
         # --- Add Event Proximity Features ---
         try:
-            report_progress("Tính khoảng cách tới lịch FED, CPI, NFP và PCE", 31)
-            days_to_fed, days_to_cpi, days_to_nfp, days_to_pce = calculate_days_until_events(df["date"])
+            report_progress("Tính khoảng cách tới lịch FED, CPI, NFP, PCE và PPI", 31)
+            days_to_fed, days_to_cpi, days_to_nfp, days_to_pce, days_to_ppi = calculate_days_until_events(df["date"])
             df["days_to_fed"] = days_to_fed
             df["days_to_cpi"] = days_to_cpi
             df["days_to_nfp"] = days_to_nfp
             df["days_to_pce"] = days_to_pce
+            df["days_to_ppi"] = days_to_ppi
         except Exception as event_err:
             print(f"Error adding event proximity features: {event_err}")
             df["days_to_fed"] = 15.0
             df["days_to_cpi"] = 15.0
             df["days_to_nfp"] = 15.0
             df["days_to_pce"] = 15.0
+            df["days_to_ppi"] = 15.0
 
         # Load already-released market signals before inference. Previously
         # these were appended after prediction, so PCE/profit-taking context
@@ -2854,7 +3009,10 @@ def get_gold_predictions(progress_callback=None):
                 values = signal.get("macro_values") or {}
                 if isinstance(values, dict):
                     latest_macro_values.update(values)
-            for field in ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom"):
+            for field in (
+                "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+            ):
                 value = latest_macro_values.get(field)
                 if value is not None:
                     df.loc[df.index[-1], field] = float(value)
@@ -2929,7 +3087,8 @@ def get_gold_predictions(progress_callback=None):
             "date", "world_price", "dxy", "us10y", "real_yield", "vix",
             "brent", "dji", "spx", "gld", "gld_trust",
             "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
-            "days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce",
+            "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+            "days_to_fed", "days_to_cpi", "days_to_nfp", "days_to_pce", "days_to_ppi",
         ]
         advisor_history = []
         for _, history_row in df.tail(30).iterrows():
@@ -2992,7 +3151,7 @@ def get_gold_predictions(progress_callback=None):
         analysis["advisor_input_data"] = {
             "data_groups": [
                 "30 phiên giá vàng và biến vĩ mô gần nhất",
-                "PCE/Core PCE và khoảng cách tới FED, CPI, NFP, PCE",
+                "PCE/Core PCE, PPI/Core PPI và khoảng cách tới FED, CPI, NFP, PCE, PPI",
                 "lịch sự kiện kinh tế Mỹ kèm actual/forecast/previous",
                 "tín hiệu thị trường đã công bố",
                 "sự kiện địa chính trị và tác động dự kiến",
@@ -3059,6 +3218,10 @@ def get_gold_predictions(progress_callback=None):
                 "pce_core_yoy": float(row.get("pce_core_yoy")) if pd.notna(row.get("pce_core_yoy")) else None,
                 "pce_headline_mom": float(row.get("pce_headline_mom")) if pd.notna(row.get("pce_headline_mom")) else None,
                 "pce_core_mom": float(row.get("pce_core_mom")) if pd.notna(row.get("pce_core_mom")) else None,
+                "ppi_yoy": float(row.get("ppi_yoy")) if pd.notna(row.get("ppi_yoy")) else None,
+                "core_ppi_yoy": float(row.get("core_ppi_yoy")) if pd.notna(row.get("core_ppi_yoy")) else None,
+                "ppi_mom": float(row.get("ppi_mom")) if pd.notna(row.get("ppi_mom")) else None,
+                "core_ppi_mom": float(row.get("core_ppi_mom")) if pd.notna(row.get("core_ppi_mom")) else None,
             })
             
         analysis["gold_history"] = plot_history
@@ -3084,7 +3247,12 @@ def get_gold_predictions(progress_callback=None):
                 latest_macro["days_to_nfp"] = int(last_row["days_to_nfp"])
             if "days_to_pce" in last_row:
                 latest_macro["days_to_pce"] = int(last_row["days_to_pce"])
-            for field in ("pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom"):
+            if "days_to_ppi" in last_row:
+                latest_macro["days_to_ppi"] = int(last_row["days_to_ppi"])
+            for field in (
+                "pce_headline_yoy", "pce_core_yoy", "pce_headline_mom", "pce_core_mom",
+                "ppi_yoy", "core_ppi_yoy", "ppi_mom", "core_ppi_mom",
+            ):
                 if field in last_row and pd.notna(last_row[field]):
                     latest_macro[field] = float(last_row[field])
         analysis["latest_macro"] = latest_macro
@@ -3393,7 +3561,7 @@ def _fetch_fed_decision_result(event):
 
 
 def _event_period(event_name):
-    """Read the release month/year embedded in CPI/NFP event names."""
+    """Read the release month/year embedded in CPI/NFP/PCE/PPI event names."""
     match = re.search(r"\(?(?:Tháng|tháng)\s+(\d{1,2})/(\d{4})\)?", event_name or "")
     if not match:
         return None
@@ -3431,7 +3599,7 @@ def _nearest_fred_value(values, date_obj):
     return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
-def _calendar_result_for_event(event, cpi_series, nfp_series, fed_upper, fed_lower):
+def _calendar_result_for_event(event, cpi_series, nfp_series, ppi_series, fed_upper, fed_lower):
     """Build one auditable actual result from the public source series."""
     event_date = datetime.strptime(event["date"], "%Y-%m-%d").date()
     if event_date > datetime.now().date():
@@ -3505,6 +3673,56 @@ def _calendar_result_for_event(event, cpi_series, nfp_series, fed_upper, fed_low
             "release_period": f"{year:04d}-{month:02d}",
             "source": "U.S. Bureau of Labor Statistics",
             "source_url": "https://www.bls.gov/news.release/empsit.toc.htm",
+        }
+
+    if category == "PPI":
+        period = _event_period(event.get("event", ""))
+        if not period:
+            return None
+        year, month = period
+        headline_series = (ppi_series or {}).get("headline", {})
+        core_series = (ppi_series or {}).get("core", {})
+        current = headline_series.get((year, month))
+        core_current = core_series.get((year, month))
+        previous_year, previous_month = _previous_month(year, month)
+        previous = headline_series.get((previous_year, previous_month))
+        previous_core = core_series.get((previous_year, previous_month))
+        year_ago = headline_series.get((year - 1, month))
+        core_year_ago = core_series.get((year - 1, month))
+        if not current or not previous:
+            return None
+
+        def _pct_change(current_row, previous_row):
+            if not current_row or not previous_row:
+                return None
+            try:
+                previous_value = float(previous_row["value"])
+                current_value = float(current_row["value"])
+                if previous_value == 0:
+                    return None
+                return (current_value / previous_value - 1.0) * 100.0
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        mom = _pct_change(current, previous)
+        previous_mom = _pct_change(previous, headline_series.get(_previous_month(previous_year, previous_month)))
+        core_mom = _pct_change(core_current, previous_core)
+        yoy = _pct_change(current, year_ago)
+        core_yoy = _pct_change(core_current, core_year_ago)
+        if mom is None:
+            return None
+        unit = f"MoM · Core PPI {core_mom:+.2f}%" if core_mom is not None else "MoM"
+        previous_text = f"{previous_mom:+.2f}%" if previous_mom is not None else ""
+        return {
+            "value": f"{mom:+.2f}%",
+            "unit": unit,
+            "previous": previous_text,
+            "direction": _direction_from_difference(mom, previous_mom) if previous_mom is not None else "",
+            "yoy": f"{yoy:+.2f}%" if yoy is not None else "",
+            "core_yoy": f"{core_yoy:+.2f}%" if core_yoy is not None else "",
+            "release_period": f"{year:04d}-{month:02d}",
+            "source": "U.S. Bureau of Labor Statistics",
+            "source_url": "https://www.bls.gov/ppi/",
         }
 
     if category == "PCE":
@@ -3604,7 +3822,7 @@ def _calendar_result_for_event(event, cpi_series, nfp_series, fed_upper, fed_low
 
 
 def refresh_economic_calendar_results(force=False):
-    """Synchronize released CPI/NFP/PCE/FOMC values into the calendar.
+    """Synchronize released CPI/NFP/PCE/PPI/FOMC values into the calendar.
 
     The calendar is seeded with dates and rules, but those are not actual
     releases.  This function only writes values returned by BLS/FRED and
@@ -3644,10 +3862,13 @@ def refresh_economic_calendar_results(force=False):
                 # event so the UI does not remain stuck at "Chưa cập nhật".
                 update_pce_history_from_fred(days=730)
 
+            if any(event.get("category") == "PPI" for event in past_events):
+                update_ppi_history_from_bls(days=730)
+
             periods = [
                 _event_period(event.get("event", ""))
                 for event in past_events
-                if event.get("category") in ("CPI", "Việc làm")
+                if event.get("category") in ("CPI", "Việc làm", "PPI")
             ]
             periods = [period for period in periods if period]
             min_year = min([period[0] for period in periods] + [now.year - 1])
@@ -3663,6 +3884,14 @@ def refresh_economic_calendar_results(force=False):
             except Exception as error:
                 source_errors.append(f"BLS NFP: {error}")
                 nfp_series = {}
+            try:
+                ppi_series = {
+                    "headline": _fetch_bls_series("PPIFIS", min_year - 1, max_year),
+                    "core": _fetch_bls_series("WPSFD49116", min_year - 1, max_year),
+                }
+            except Exception as error:
+                source_errors.append(f"BLS PPI: {error}")
+                ppi_series = {"headline": {}, "core": {}}
 
             # FOMC results are read from the official Fed release per event.
             # Leave the FRED maps empty here so a slow FRED endpoint cannot
@@ -3678,6 +3907,7 @@ def refresh_economic_calendar_results(force=False):
                     event,
                     cpi_series,
                     nfp_series,
+                    ppi_series,
                     fed_upper,
                     fed_lower,
                 )
@@ -4023,6 +4253,7 @@ def fetch_us_macro_indicators():
     Fetches US macroeconomic indicators from FRED:
     - CPI: CPIAUCSL (YoY change)
     - PCE/Core PCE: PCEPI/PCEPILFE (YoY change)
+    - PPI/Core PPI: PPIFIS/WPSFD49116 (YoY change)
     - Unemployment: UNRATE
     - NFP: PAYEMS (monthly change)
     - Fed Funds Rate: FEDFUNDS
@@ -4040,7 +4271,7 @@ def fetch_us_macro_indicators():
                 data = cached.get("data")
                 # Older cache documents predate the explicit PCE fields.  A
                 # cache without them must be refreshed once after deployment.
-                if data and data.get("pce") and data.get("core_pce"):
+                if data and data.get("pce") and data.get("core_pce") and data.get("ppi") and data.get("core_ppi"):
                     return data
     except Exception as e:
         print(f"Error checking US macro cache: {e}")
@@ -4087,6 +4318,32 @@ def fetch_us_macro_indicators():
             "gold_impact": "Core PCE cao → kỳ vọng giữ lãi suất cao lâu hơn → vàng giảm",
             "impact_direction": "opposite",
             "description": "Lạm phát PCE loại trừ nhóm thực phẩm và năng lượng"
+        },
+        "ppi": {
+            "name": "PPI (Giá sản xuất Mỹ)",
+            "value": None,
+            "prev_value": None,
+            "date": None,
+            "unit": "%/năm",
+            "source": "FRED/BLS",
+            "source_url": "https://fred.stlouisfed.org/series/PPIFIS",
+            "trend": None,
+            "gold_impact": "PPI cao → kỳ vọng FED hawkish → vàng chịu áp lực; PPI hạ nhiệt có tác động ngược lại",
+            "impact_direction": "opposite",
+            "description": "Chỉ số giá sản xuất Mỹ, dùng như tín hiệu sớm của áp lực lạm phát"
+        },
+        "core_ppi": {
+            "name": "Core PPI (PPI lõi)",
+            "value": None,
+            "prev_value": None,
+            "date": None,
+            "unit": "%/năm",
+            "source": "FRED/BLS",
+            "source_url": "https://fred.stlouisfed.org/series/WPSFD49116",
+            "trend": None,
+            "gold_impact": "Core PPI cao → áp lực giữ lãi suất cao lâu hơn → vàng giảm",
+            "impact_direction": "opposite",
+            "description": "PPI lõi loại trừ nhóm thực phẩm, năng lượng và dịch vụ thương mại"
         },
         "unemployment": {
             "name": "Tỷ Lệ Thất Nghiệp Mỹ",
@@ -4192,6 +4449,20 @@ def fetch_us_macro_indicators():
                 indicators[indicator_key]["prev_value"] = round(float(prev["yoy"]), 2)
                 indicators[indicator_key]["date"] = latest["date"][:7]
 
+    # --- 1c. Fetch headline/Core PPI (YoY) ---
+    for indicator_key, series_id in (("ppi", "PPIFIS"), ("core_ppi", "WPSFD49116")):
+        df_ppi = fetch_fred_series(series_id)
+        if df_ppi is not None and len(df_ppi) >= 13:
+            df_ppi["prev_year_value"] = df_ppi["value"].shift(12)
+            df_ppi["yoy"] = (df_ppi["value"] / df_ppi["prev_year_value"] - 1) * 100
+            df_ppi = df_ppi.dropna()
+            if not df_ppi.empty:
+                latest = df_ppi.iloc[-1]
+                prev = df_ppi.iloc[-2]
+                indicators[indicator_key]["value"] = round(float(latest["yoy"]), 2)
+                indicators[indicator_key]["prev_value"] = round(float(prev["yoy"]), 2)
+                indicators[indicator_key]["date"] = latest["date"][:7]
+
     # --- 2. Fetch Unemployment ---
     df_unrate = fetch_fred_series("UNRATE")
     if df_unrate is not None and len(df_unrate) >= 2:
@@ -4240,19 +4511,19 @@ def fetch_us_macro_indicators():
         "new_home_sales": {"value": 724, "prev_value": 697, "date": "2025-03"}
     }
 
-    for key, fb in FALLBACK_DATA.items():
-        ind = indicators[key]
-        if ind["value"] is None:
+    for key, ind in indicators.items():
+        fb = FALLBACK_DATA.get(key)
+        if ind["value"] is None and fb:
             ind["value"] = fb["value"]
             ind["prev_value"] = fb["prev_value"]
             ind["date"] = fb.get("date")
-        else:
+        elif fb:
             if ind["prev_value"] is None:
                 ind["prev_value"] = fb.get("prev_value")
             if ind["date"] is None:
                 ind["date"] = fb.get("date")
 
-        # Compute trend
+        # Compute trend for both fallback-backed and live-only indicators.
         if ind["value"] is not None and ind["prev_value"] is not None:
             if ind["value"] > ind["prev_value"]:
                 ind["trend"] = "up"
@@ -4338,6 +4609,10 @@ def build_fed_policy_outlook(
     pce_yoy = choose("pce", "pce_headline_yoy")
     core_pce_yoy = choose("core_pce", "pce_core_yoy")
     core_pce_mom = history_value("pce_core_mom")
+    ppi_yoy = choose("ppi", "ppi_yoy")
+    core_ppi_yoy = choose("core_ppi", "core_ppi_yoy")
+    ppi_mom = history_value("ppi_mom")
+    core_ppi_mom = history_value("core_ppi_mom")
     nfp_change = choose("nonfarm", "nfp_change")
     unemployment = choose("unemployment", "unemployment")
     fed_rate = choose("fed_rate", "fed_rate")
@@ -4372,10 +4647,22 @@ def build_fed_policy_outlook(
         cpi_gap = clamp((cpi_yoy - 2.0) / 1.5)
         add_component("CPI so với mục tiêu 2%", cpi_gap, 0.10)
         inflation_scores.append(cpi_gap)
+    if ppi_yoy is not None:
+        ppi_gap = clamp((ppi_yoy - 2.5) / 1.5)
+        add_component("PPI xu hướng giá sản xuất", ppi_gap, 0.04)
+        inflation_scores.append(ppi_gap)
+    if core_ppi_yoy is not None:
+        core_ppi_gap = clamp((core_ppi_yoy - 2.5) / 1.5)
+        add_component("Core PPI xu hướng giá nền", core_ppi_gap, 0.06)
+        inflation_scores.append(core_ppi_gap)
     if core_pce_mom is not None:
         monthly_pressure = clamp((core_pce_mom - (2.0 / 12.0)) / 0.15)
         add_component("Động lượng Core PCE tháng", monthly_pressure, 0.10)
         inflation_scores.append(monthly_pressure)
+    if core_ppi_mom is not None:
+        ppi_monthly_pressure = clamp((core_ppi_mom - (2.5 / 12.0)) / 0.20)
+        add_component("Động lượng Core PPI tháng", ppi_monthly_pressure, 0.04)
+        inflation_scores.append(ppi_monthly_pressure)
 
     inflation_score = float(np.mean(inflation_scores)) if inflation_scores else 0.0
 
@@ -4457,6 +4744,10 @@ def build_fed_policy_outlook(
         drivers.append(f"Core PCE {core_pce_yoy:.2f}% so với mục tiêu 2%")
     if cpi_yoy is not None:
         drivers.append(f"CPI {cpi_yoy:.2f}%")
+    if ppi_yoy is not None or core_ppi_yoy is not None:
+        ppi_text = f"PPI {ppi_yoy:.2f}%" if ppi_yoy is not None else "PPI --"
+        core_ppi_text = f"Core PPI {core_ppi_yoy:.2f}%" if core_ppi_yoy is not None else "Core PPI --"
+        drivers.append(f"{ppi_text}, {core_ppi_text}")
     if nfp_change is not None and unemployment is not None:
         drivers.append(f"NFP {nfp_change:+.0f} nghìn, thất nghiệp {unemployment:.1f}%")
     if speech_is_recent and latest_fed_event:
@@ -4472,6 +4763,10 @@ def build_fed_policy_outlook(
         {"key": "pce_yoy", "label": "PCE YoY", "value": pce_yoy, "unit": "%", "impact": "Cao hơn → hawkish"},
         {"key": "core_pce_yoy", "label": "Core PCE YoY", "value": core_pce_yoy, "unit": "%", "impact": "Cao hơn → hawkish"},
         {"key": "core_pce_mom", "label": "Core PCE MoM", "value": core_pce_mom, "unit": "%", "impact": "Động lượng lạm phát"},
+        {"key": "ppi_yoy", "label": "PPI YoY", "value": ppi_yoy, "unit": "%", "impact": "Cao hơn → hawkish sớm hơn"},
+        {"key": "core_ppi_yoy", "label": "Core PPI YoY", "value": core_ppi_yoy, "unit": "%", "impact": "Cao hơn → hawkish"},
+        {"key": "ppi_mom", "label": "PPI MoM", "value": ppi_mom, "unit": "%", "impact": "Động lượng giá sản xuất"},
+        {"key": "core_ppi_mom", "label": "Core PPI MoM", "value": core_ppi_mom, "unit": "%", "impact": "Động lượng giá nền"},
         {"key": "fed_rate", "label": "Fed Funds hiện tại", "value": fed_rate, "unit": "%", "impact": "Mức nền chính sách"},
         {"key": "nfp_change", "label": "NFP thay đổi", "value": nfp_change, "unit": "nghìn", "impact": "Việc làm mạnh → hawkish"},
         {"key": "unemployment", "label": "Thất nghiệp", "value": unemployment, "unit": "%", "impact": "Thất nghiệp thấp → hawkish"},
@@ -4505,6 +4800,10 @@ def build_fed_policy_outlook(
             "pce_yoy": pce_yoy,
             "core_pce_yoy": core_pce_yoy,
             "core_pce_mom": core_pce_mom,
+            "ppi_yoy": ppi_yoy,
+            "core_ppi_yoy": core_ppi_yoy,
+            "ppi_mom": ppi_mom,
+            "core_ppi_mom": core_ppi_mom,
         },
         "fed_action": {
             "primary": action_labels[action_key],
@@ -4936,6 +5235,13 @@ def generate_prediction_explanation_for_date(row_curr, row_prev, pred_trend):
     return " | ".join(selected)
 
 def get_gold_prediction_history_with_explanations():
+    # Resolve newly available actual closes before taking the snapshot for the
+    # API. The background crawler does this as well, but this cheap retry keeps
+    # the history page correct after a manual refresh or a crawler restart.
+    try:
+        resolve_unresolved_predictions()
+    except Exception as resolve_error:
+        print(f"Error resolving prediction history before read: {resolve_error}")
     cursor = db.gold_predictions_history.find({}, {"_id": 0}).sort("date", -1).limit(90)
     history = list(cursor)
     history.reverse()
